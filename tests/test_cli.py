@@ -34,16 +34,16 @@ def test_full_cli_coweave_loop(capsys, live_server):
         "id": None,
     }
 
-    # agent reads the active thread
-    active = run(capsys, live_server, "--weave", wid, "read")
-    assert active["content"] == "The loom hummed"
+    # agent reads the thread at the (default-named) cursor `new` just placed
+    thread = run(capsys, live_server, "--weave", wid, "read")
+    assert thread["content"] == "The loom hummed"
 
     # agent reads as plain text
     main(["--server", live_server, "--weave", wid, "read", "--text"])
     assert capsys.readouterr().out == "The loom hummed"
 
-    # agent generates branches from the active tip
-    nodes = run(capsys, live_server, "--weave", wid, "gen", "--set-active")
+    # agent generates branches from its cursor
+    nodes = run(capsys, live_server, "--weave", wid, "gen", "--move-cursor")
     assert len(nodes) == 2
     assert all(n["parents"] == [root_id] for n in nodes)
     assert nodes[0]["content"]["type"] == "tokens"
@@ -63,13 +63,13 @@ def test_full_cli_coweave_loop(capsys, live_server):
         "claude",
         "--creator-type",
         "model",
-        "--set-active",
+        "--move-cursor",
     )
     assert branch["creator"]["type"] == "model"
     assert branch["creator"]["label"] == "claude"
 
-    active = run(capsys, live_server, "--weave", wid, "read")
-    assert active["content"] == "The loom hummed and the agent wove on"
+    thread = run(capsys, live_server, "--weave", wid, "read")
+    assert thread["content"] == "The loom hummed and the agent wove on"
 
     # tree shows all branches with attribution intact
     tree = run(capsys, live_server, "--weave", wid, "read", "--tree")
@@ -85,9 +85,19 @@ def test_full_cli_coweave_loop(capsys, live_server):
     assert types.count("node_added") == 4
     cursor = events["cursor"]
 
-    run(capsys, live_server, "--weave", wid, "set-active", root_id)
+    # the human points the agent's cursor back at the root ("look here")
+    moved = run(
+        capsys, live_server, "--weave", wid, "--cursor", "clem",
+        "cursor", "set", root_id, "--name", "default",
+    )
+    assert moved["moved_by"] == "clem"
     newer = run(capsys, live_server, "--weave", wid, "events", "--since", str(cursor))
-    assert [e["type"] for e in newer["events"]] == ["active_changed"]
+    assert [e["type"] for e in newer["events"]] == ["cursor_moved"]
+    assert newer["events"][0]["payload"]["moved_by"] == "clem"
+
+    cursors = run(capsys, live_server, "--weave", wid, "cursor", "list")
+    assert set(cursors) == {"default"}
+    assert cursors["default"]["node_id"] == root_id
 
 
 def test_cli_bookmark_split_rm(capsys, live_server):

@@ -88,7 +88,7 @@ async def main() -> None:
 
         ws_url = f"ws://127.0.0.1:{port}/ws?weave_id={wid}"
         async with connect(ws_url) as ws:
-            gen_nodes = cli(server, "--weave", wid, "gen", "-n", "2", "--set-active")
+            gen_nodes = cli(server, "--weave", wid, "gen", "-n", "2", "--move-cursor")
             assert len(gen_nodes) == 2
             assert all(n["content"]["type"] == "tokens" for n in gen_nodes)
             tok = gen_nodes[0]["content"]["tokens"][0]
@@ -101,10 +101,10 @@ async def main() -> None:
             events = []
             while len(events) < 3:
                 events.append(json.loads(await asyncio.wait_for(ws.recv(), 10)))
-            # choice 0 is added + set active in one transaction, then choice 1
+            # choice 0 is added + cursor moved in one transaction, then choice 1
             assert [e["type"] for e in events] == [
                 "node_added",
-                "active_changed",
+                "cursor_moved",
                 "node_added",
             ]
             print("websocket saw the generation live")
@@ -122,11 +122,11 @@ async def main() -> None:
             "claude",
             "--creator-type",
             "model",
-            "--set-active",
+            "--move-cursor",
         )
-        active = cli(server, "--weave", wid, "read")
-        assert active["content"].endswith(" (and so it goes)")
-        print("active thread:", repr(active["content"]))
+        thread = cli(server, "--weave", wid, "read")
+        assert thread["content"].endswith(" (and so it goes)")
+        print("cursor thread:", repr(thread["content"]))
 
         polled = cli(server, "--weave", wid, "events")
         assert [e["type"] for e in polled["events"]].count("node_added") == 4

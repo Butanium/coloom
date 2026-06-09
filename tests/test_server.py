@@ -53,21 +53,35 @@ def test_weave_crud(client):
     assert client.get(f"/weaves/{wid}").status_code == 404
 
 
-def test_add_read_active_flow(client):
+def test_add_read_cursor_flow(client):
     wid = make_weave(client)
     root = add(
-        client, wid, "Once", set_active=True, creator={"type": "human", "label": "clem"}
+        client,
+        wid,
+        "Once",
+        move_cursor="clem",
+        creator={"type": "human", "label": "clem"},
     )
-    child = add(client, wid, " upon", parent=root["id"], set_active=True)
+    child = add(client, wid, " upon", parent=root["id"], move_cursor="clem")
 
-    active = client.get(f"/weaves/{wid}/active").json()
-    assert active["content"] == "Once upon"
-    assert active["path"] == [root["id"], child["id"]]
-    assert active["nodes"][0]["creator"]["label"] == "clem"
+    thread = client.get(f"/weaves/{wid}/cursors/clem/thread").json()
+    assert thread["content"] == "Once upon"
+    assert thread["path"] == [root["id"], child["id"]]
+    assert thread["nodes"][0]["creator"]["label"] == "clem"
 
-    assert client.put(f"/weaves/{wid}/active", json={"node_id": root["id"]}).json() == {
-        "path": [root["id"]]
-    }
+    # anyone can move anyone's cursor; moved_by records the mover
+    moved = client.put(
+        f"/weaves/{wid}/cursors/clem",
+        json={"node_id": root["id"], "moved_by": "agent"},
+    ).json()
+    assert moved["node_id"] == root["id"]
+    assert moved["moved_by"] == "agent"
+    assert set(client.get(f"/weaves/{wid}/cursors").json()) == {"clem"}
+
+    assert client.delete(f"/weaves/{wid}/cursors/clem").status_code == 204
+    assert client.get(f"/weaves/{wid}/cursors").json() == {}
+    assert client.get(f"/weaves/{wid}/cursors/clem/thread").status_code == 404
+
     tree = client.get(f"/weaves/{wid}").json()
     assert tree["roots"] == [root["id"]]
     assert tree["nodes"][root["id"]]["children"] == [child["id"]]
@@ -106,9 +120,11 @@ def test_split_bad_offset_is_400(client):
 def test_gen_creates_token_children(client, fake_openai_url):
     _, fake_app = fake_openai_url
     wid = make_weave(client)
-    root = add(client, wid, "The loom hummed softly as the weaver", set_active=True)
+    root = add(client, wid, "The loom hummed softly as the weaver", move_cursor="agent")
 
-    resp = client.post(f"/weaves/{wid}/gen", json={"set_active": True})
+    resp = client.post(
+        f"/weaves/{wid}/gen", json={"cursor": "agent", "move_cursor": True}
+    )
     assert resp.status_code == 201, resp.text
     nodes = resp.json()
     assert len(nodes) == 2  # fixture has n=2 choices
@@ -121,28 +137,46 @@ def test_gen_creates_token_children(client, fake_openai_url):
     assert (
         fake_app.state.received[-1]["prompt"] == "The loom hummed softly as the weaver"
     )
-    # set_active made the first generated node the tip
-    active = client.get(f"/weaves/{wid}/active").json()
-    assert active["path"] == [root["id"], nodes[0]["id"]]
+    # move_cursor moved the agent's cursor to the first generated node
+    thread = client.get(f"/weaves/{wid}/cursors/agent/thread").json()
+    assert thread["path"] == [root["id"], nodes[0]["id"]]
 
 
-def test_gen_without_active_path_is_400(client):
+def test_gen_without_node_or_cursor_is_400(client):
     wid = make_weave(client)
     assert client.post(f"/weaves/{wid}/gen", json={}).status_code == 400
 
 
+def test_gen_with_missing_cursor_is_404(client):
+    wid = make_weave(client)
+    add(client, wid, "x")
+    assert client.post(f"/weaves/{wid}/gen", json={"cursor": "ghost"}).status_code == 404
+
+
+def test_gen_move_cursor_without_cursor_is_400(client):
+    wid = make_weave(client)
+    root = add(client, wid, "x")
+    resp = client.post(
+        f"/weaves/{wid}/gen", json={"node_id": root["id"], "move_cursor": True}
+    )
+    assert resp.status_code == 400
+
+
 def test_gen_unknown_preset_is_400(client):
     wid = make_weave(client)
-    add(client, wid, "x", set_active=True)
-    resp = client.post(f"/weaves/{wid}/gen", json={"preset": "nope"})
+    root = add(client, wid, "x")
+    resp = client.post(
+        f"/weaves/{wid}/gen", json={"node_id": root["id"], "preset": "nope"}
+    )
     assert resp.status_code == 400
 
 
 def test_gen_unreachable_endpoint_is_502(client):
     wid = make_weave(client)
-    add(client, wid, "x", set_active=True)
+    root = add(client, wid, "x")
     resp = client.post(
-        f"/weaves/{wid}/gen", json={"preset": "dead", "params": {"timeout": 2}}
+        f"/weaves/{wid}/gen",
+        json={"node_id": root["id"], "preset": "dead", "params": {"timeout": 2}},
     )
     assert resp.status_code == 502
     assert "failed" in resp.json()["detail"]
@@ -150,8 +184,10 @@ def test_gen_unreachable_endpoint_is_502(client):
 
 def test_gen_missing_api_key_env_is_502(client):
     wid = make_weave(client)
-    add(client, wid, "x", set_active=True)
-    resp = client.post(f"/weaves/{wid}/gen", json={"preset": "keyless"})
+    root = add(client, wid, "x")
+    resp = client.post(
+        f"/weaves/{wid}/gen", json={"node_id": root["id"], "preset": "keyless"}
+    )
     assert resp.status_code == 502
     assert "COLOOM_TEST_UNSET_KEY" in resp.json()["detail"]
 
@@ -207,11 +243,13 @@ def test_events_polling_cursor(client):
 def test_websocket_broadcast(client):
     wid = make_weave(client)
     with client.websocket_connect(f"/ws?weave_id={wid}") as ws:
-        node = add(client, wid, "hi", set_active=True)
+        node = add(client, wid, "hi", move_cursor="clem")
         event = ws.receive_json()
         assert event["type"] == "node_added"
         assert event["payload"]["node_id"] == node["id"]
-        assert ws.receive_json()["type"] == "active_changed"
+        cursor_event = ws.receive_json()
+        assert cursor_event["type"] == "cursor_moved"
+        assert cursor_event["payload"]["name"] == "clem"
 
 
 def test_websocket_filter_excludes_other_weaves(client):

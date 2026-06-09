@@ -117,8 +117,19 @@ class WeaveInfo(BaseModel):
     title: str = "Untitled weave"
     description: str = ""
     created: datetime = Field(default_factory=utcnow)
-    active_path: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Cursor(BaseModel):
+    """A named position in the weave. There is no single "active path": each
+    participant (human, agent, ...) keeps a cursor, and anyone may move anyone's
+    cursor — moving someone else's is the "hey, look here" gesture. A cursor's
+    thread is derived (root→node is unique in a tree)."""
+
+    name: str
+    node_id: str
+    updated: datetime = Field(default_factory=utcnow)
+    moved_by: str | None = None
 
 
 class Weave(BaseModel):
@@ -130,6 +141,6 @@ class Weave(BaseModel):
     created: datetime
     nodes: dict[str, Node]
     roots: list[str]
-    active_path: list[str]
+    cursors: dict[str, Cursor]
     bookmarks: list[str]
     metadata: dict[str, Any] = Field(default_factory=dict)

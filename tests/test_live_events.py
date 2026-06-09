@@ -54,7 +54,7 @@ def test_two_clients_see_each_other_live(capsys, live_server):
         root_id,
         "--text",
         " grows",
-        "--set-active",
+        "--move-cursor",
     )
     generated = cli(capsys, live_server, "--weave", wid, "gen")
 
@@ -64,7 +64,7 @@ def test_two_clients_see_each_other_live(capsys, live_server):
 
     assert [e["type"] for e in events] == [
         "node_added",  # A's manual branch
-        "active_changed",  # --set-active
+        "cursor_moved",  # --move-cursor
         "node_added",  # gen choice 0
         "node_added",  # gen choice 1
     ]

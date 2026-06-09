@@ -34,6 +34,8 @@ def test_get_missing_raises(store):
     w = store.create_weave()
     with pytest.raises(NotFound):
         store.get_node(w.id, "nope")
+    with pytest.raises(NotFound):
+        store.get_cursor(w.id, "nope")
 
 
 def test_add_nodes_tree_shape(store):
@@ -61,7 +63,7 @@ def test_persistence_roundtrip(tmp_path):
         w.id,
         Tokens(tokens=[Token(text="Hi", logprob=-0.1, token_id=42, entropy=1.2)]),
         ModelCreator(label="gpt4-base", seed=7, raw_request={"prompt": "x"}),
-        set_active=True,
+        move_cursor="agent",
     )
     s1.close()
 
@@ -72,66 +74,94 @@ def test_persistence_roundtrip(tmp_path):
     assert node.content.tokens[0].entropy == 1.2
     assert node.creator.seed == 7
     assert node.creator.raw_request == {"prompt": "x"}
-    assert weave.active_path == [root.id]
+    assert weave.cursors["agent"].node_id == root.id
     s2.close()
 
 
-def test_active_path_and_content(store):
+def test_cursors_and_threads(store):
     w = store.create_weave()
     root = store.add_node(w.id, Snippet(text="a"))
     mid = store.add_node(w.id, Snippet(text="b"), parent_id=root.id)
     leaf = store.add_node(w.id, Snippet(text="c"), parent_id=mid.id)
     sibling = store.add_node(w.id, Snippet(text="z"), parent_id=root.id)
 
-    assert store.set_active(w.id, leaf.id) == [root.id, mid.id, leaf.id]
-    assert store.get_active_content(w.id) == "abc"
+    cur = store.set_cursor(w.id, "clem", leaf.id)
+    assert cur.node_id == leaf.id
+    thread = store.get_cursor_thread(w.id, "clem")
+    assert [n.id for n in thread] == [root.id, mid.id, leaf.id]
+    assert "".join(n.text for n in thread) == "abc"
 
-    # switching to a sibling re-anchors the path
-    assert store.set_active(w.id, sibling.id) == [root.id, sibling.id]
-    assert store.get_active_content(w.id) == "az"
+    # two independent cursors coexist
+    store.set_cursor(w.id, "agent", sibling.id)
+    assert set(store.list_cursors(w.id)) == {"clem", "agent"}
+    agent_thread = store.get_cursor_thread(w.id, "agent")
+    assert "".join(n.text for n in agent_thread) == "az"
 
-    # set_active on an ancestor truncates
-    assert store.set_active(w.id, root.id) == [root.id]
-    assert store.set_active(w.id, None) == []
-    assert store.get_active_content(w.id) == ""
+    # anyone can move anyone's cursor; moved_by records who
+    moved = store.set_cursor(w.id, "clem", sibling.id, moved_by="agent")
+    assert moved.moved_by == "agent"
+    assert store.get_cursor(w.id, "clem").node_id == sibling.id
+
+    store.delete_cursor(w.id, "agent")
+    assert set(store.list_cursors(w.id)) == {"clem"}
+    with pytest.raises(NotFound):
+        store.get_cursor(w.id, "agent")
 
 
-def test_add_node_set_active(store):
+def test_set_cursor_requires_existing_node(store):
     w = store.create_weave()
-    root = store.add_node(w.id, Snippet(text="a"), set_active=True)
-    child = store.add_node(w.id, Snippet(text="b"), parent_id=root.id, set_active=True)
-    assert store.get_weave_info(w.id).active_path == [root.id, child.id]
+    with pytest.raises(NotFound):
+        store.set_cursor(w.id, "clem", "nope")
 
 
-def test_remove_node_cascades_and_truncates_active(store):
+def test_add_node_move_cursor(store):
+    w = store.create_weave()
+    root = store.add_node(w.id, Snippet(text="a"), move_cursor="clem")
+    child = store.add_node(
+        w.id, Snippet(text="b"), parent_id=root.id, move_cursor="clem"
+    )
+    assert store.get_cursor(w.id, "clem").node_id == child.id
+
+
+def test_remove_node_cascades_and_relocates_cursors(store):
     w = store.create_weave()
     root = store.add_node(w.id, Snippet(text="a"))
     mid = store.add_node(w.id, Snippet(text="b"), parent_id=root.id)
     leaf = store.add_node(w.id, Snippet(text="c"), parent_id=mid.id)
-    store.set_active(w.id, leaf.id)
+    store.set_cursor(w.id, "clem", leaf.id)
 
     removed = store.remove_node(w.id, mid.id)
     assert set(removed) == {mid.id, leaf.id}
     weave = store.get_weave(w.id)
     assert set(weave.nodes) == {root.id}
-    assert weave.active_path == [root.id]
+    # cursor relocated to the removed subtree's parent
+    assert weave.cursors["clem"].node_id == root.id
     assert weave.nodes[root.id].children == []
+
+    # removing a root deletes cursors pointing into its subtree
+    removed = store.remove_node(w.id, root.id)
+    assert set(removed) == {root.id}
+    assert store.list_cursors(w.id) == {}
 
 
 def test_split_snippet(store):
     w = store.create_weave()
     root = store.add_node(w.id, Snippet(text="hello world"))
     child = store.add_node(w.id, Snippet(text="!"), parent_id=root.id)
-    store.set_active(w.id, child.id)
+    store.set_cursor(w.id, "clem", child.id)
+    store.set_cursor(w.id, "agent", root.id)
 
     head, tail = store.split_node(w.id, root.id, 5)
     assert head.id == root.id and head.text == "hello"
     assert tail.text == " world"
     assert head.children == [tail.id]
     assert tail.children == [child.id]
-    # active path now threads through the tail
-    assert store.get_weave_info(w.id).active_path == [root.id, tail.id, child.id]
-    assert store.get_active_content(w.id) == "hello world!"
+    # cursor on a deeper node is untouched; its thread now includes the tail
+    clem_thread = store.get_cursor_thread(w.id, "clem")
+    assert [n.id for n in clem_thread] == [root.id, tail.id, child.id]
+    assert "".join(n.text for n in clem_thread) == "hello world!"
+    # cursor on the split node moved to the tail (thread content unchanged)
+    assert store.get_cursor(w.id, "agent").node_id == tail.id
 
 
 def test_split_tokens_at_token_boundary(store):
@@ -170,11 +200,16 @@ def test_multiple_roots(store):
 
 def test_events_log_and_cursor(store):
     w = store.create_weave()
-    n = store.add_node(w.id, Snippet(text="x"), set_active=True)
+    n = store.add_node(w.id, Snippet(text="x"), move_cursor="clem")
     events = store.get_events(w.id)
     types = [e["type"] for e in events]
-    assert types == ["weave_created", "node_added", "active_changed"]
+    assert types == ["weave_created", "node_added", "cursor_moved"]
     assert events[1]["payload"]["node_id"] == n.id
+    assert events[2]["payload"] == {
+        "name": "clem",
+        "node_id": n.id,
+        "moved_by": "clem",
+    }
 
     cursor = events[-1]["seq"]
     store.set_bookmarked(w.id, n.id, True)
@@ -200,7 +235,7 @@ def test_concurrent_readers_never_see_torn_state(tmp_path):
             for i in range(80):
                 root = store.add_node(wid, Snippet(text=f"r{i}"))
                 store.add_node(
-                    wid, Snippet(text="c"), parent_id=root.id, set_active=True
+                    wid, Snippet(text="c"), parent_id=root.id, move_cursor="w"
                 )
                 store.remove_node(wid, root.id)
         except Exception as e:  # surfaced via `errors`, not swallowed
@@ -217,9 +252,10 @@ def test_concurrent_readers_never_see_torn_state(tmp_path):
                         assert cid in weave.nodes, "child edge points to missing node"
                     for pid in node.parents:
                         assert pid in weave.nodes, "parent edge points to missing node"
-                for nid in weave.active_path:
-                    assert nid in weave.nodes, "active path references missing node"
-                store.get_active_thread(wid)
+                for cur in weave.cursors.values():
+                    assert cur.node_id in weave.nodes, (
+                        "cursor references missing node"
+                    )
                 store.get_events(weave_id=wid)
         except Exception as e:
             errors.append(e)
@@ -238,7 +274,7 @@ def test_concurrent_readers_never_see_torn_state(tmp_path):
 
 def test_weave_json_export(store):
     w = store.create_weave(title="exp")
-    store.add_node(w.id, make_tokens("a"), ModelCreator(label="m"), set_active=True)
+    store.add_node(w.id, make_tokens("a"), ModelCreator(label="m"), move_cursor="m")
     snapshot = store.get_weave(w.id)
     as_json = snapshot.model_dump_json()
     from coloom.models import Weave

@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 from coloom.models import (
     Creator,
+    Cursor,
     Node,
     NodeContent,
     Snippet,
@@ -43,8 +44,15 @@ CREATE TABLE IF NOT EXISTS weaves (
     title       TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     created     TEXT NOT NULL,
-    active_path TEXT NOT NULL DEFAULT '[]',
     metadata    TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS cursors (
+    weave_id TEXT NOT NULL REFERENCES weaves(id) ON DELETE CASCADE,
+    name     TEXT NOT NULL,
+    node_id  TEXT NOT NULL,
+    updated  TEXT NOT NULL,
+    moved_by TEXT,
+    PRIMARY KEY (weave_id, name)
 );
 CREATE TABLE IF NOT EXISTS nodes (
     id         TEXT PRIMARY KEY,
@@ -125,14 +133,13 @@ class WeaveStore:
         info = WeaveInfo(title=title, description=description, metadata=metadata or {})
         with self._tx() as c:
             c.execute(
-                "INSERT INTO weaves (id, title, description, created, active_path, metadata)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO weaves (id, title, description, created, metadata)"
+                " VALUES (?, ?, ?, ?, ?)",
                 (
                     info.id,
                     info.title,
                     info.description,
                     info.created.isoformat(),
-                    json.dumps(info.active_path),
                     json.dumps(info.metadata),
                 ),
             )
@@ -158,16 +165,18 @@ class WeaveStore:
     def delete_weave(self, weave_id: str) -> None:
         with self._tx() as c:
             self.get_weave_info(weave_id)
+            c.execute("DELETE FROM cursors WHERE weave_id = ?", (weave_id,))
             c.execute("DELETE FROM edges WHERE weave_id = ?", (weave_id,))
             c.execute("DELETE FROM nodes WHERE weave_id = ?", (weave_id,))
             c.execute("DELETE FROM weaves WHERE id = ?", (weave_id,))
             self._log_event(c, weave_id, "weave_deleted", {})
 
     def get_weave(self, weave_id: str) -> Weave:
-        """Full snapshot: nodes with linked edges, roots, active path, bookmarks."""
+        """Full snapshot: nodes with linked edges, roots, cursors, bookmarks."""
         with self._lock:
             info = self.get_weave_info(weave_id)
             nodes = {n.id: n for n in self._load_nodes(weave_id)}
+            cursors = self.list_cursors(weave_id)
         roots = [
             n.id
             for n in sorted(nodes.values(), key=lambda n: (n.created, n.id))
@@ -181,7 +190,7 @@ class WeaveStore:
             created=info.created,
             nodes=nodes,
             roots=roots,
-            active_path=info.active_path,
+            cursors=cursors,
             bookmarks=bookmarks,
             metadata=info.metadata,
         )
@@ -193,7 +202,6 @@ class WeaveStore:
             title=row["title"],
             description=row["description"],
             created=_dt(row["created"]),
-            active_path=json.loads(row["active_path"]),
             metadata=json.loads(row["metadata"]),
         )
 
@@ -260,10 +268,11 @@ class WeaveStore:
         content: NodeContent,
         creator: Creator | None = None,
         parent_id: str | None = None,
-        set_active: bool = False,
+        move_cursor: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Node:
-        """Add a node under `parent_id` (or as a new root if None)."""
+        """Add a node under `parent_id` (or as a new root if None).
+        `move_cursor` (a cursor name) moves that cursor to the new node."""
         node = Node(
             content=content,
             creator=creator or UnknownCreator(),
@@ -283,9 +292,8 @@ class WeaveStore:
                 "node_added",
                 {"node_id": node.id, "parent_id": parent_id},
             )
-            if set_active:
-                path = self._path_to_root(weave_id, node.id)
-                self._set_active_path(c, weave_id, path)
+            if move_cursor is not None:
+                self._upsert_cursor(c, weave_id, move_cursor, node.id, move_cursor)
         return node
 
     def _insert_node(self, c: sqlite3.Connection, weave_id: str, node: Node) -> None:
@@ -318,11 +326,16 @@ class WeaveStore:
         )
 
     def remove_node(self, weave_id: str, node_id: str) -> list[str]:
-        """Remove a node and its whole subtree. Returns removed node ids."""
+        """Remove a node and its whole subtree. Returns removed node ids.
+        Cursors pointing into the doomed subtree relocate to the removed node's
+        parent (or are deleted if it was a root)."""
         with self._tx() as c:
-            self.get_node(weave_id, node_id)
+            node = self.get_node(weave_id, node_id)
             doomed = self._collect_subtree(weave_id, node_id)
-            info = self.get_weave_info(weave_id)
+            stranded = [
+                cur for cur in self.list_cursors(weave_id).values()
+                if cur.node_id in set(doomed)
+            ]
             qmarks = ",".join("?" * len(doomed))
             c.execute(
                 f"DELETE FROM edges WHERE weave_id = ? AND"
@@ -330,11 +343,18 @@ class WeaveStore:
                 (weave_id, *doomed, *doomed),
             )
             c.execute(f"DELETE FROM nodes WHERE id IN ({qmarks})", tuple(doomed))
-            if any(n in info.active_path for n in doomed):
-                cut = min(
-                    info.active_path.index(n) for n in doomed if n in info.active_path
-                )
-                self._set_active_path(c, weave_id, info.active_path[:cut])
+            refuge = node.parents[0] if node.parents else None
+            for cur in stranded:
+                if refuge is None:
+                    c.execute(
+                        "DELETE FROM cursors WHERE weave_id = ? AND name = ?",
+                        (weave_id, cur.name),
+                    )
+                    self._log_event(
+                        c, weave_id, "cursor_removed", {"name": cur.name}
+                    )
+                else:
+                    self._upsert_cursor(c, weave_id, cur.name, refuge, None)
             self._log_event(c, weave_id, "node_removed", {"node_ids": doomed})
         return doomed
 
@@ -370,14 +390,15 @@ class WeaveStore:
     def split_node(self, weave_id: str, node_id: str, at: int) -> tuple[Node, Node]:
         """Split a node's content at `at` (token index for Tokens, char offset for
         Snippet). The original node keeps the head (its id, parents, bookmarks stay);
-        a new node takes the tail and inherits the children. Returns (head, tail)."""
+        a new node takes the tail and inherits the children. Returns (head, tail).
+        Cursors on the split node move to the tail so their thread content is
+        unchanged."""
         with self._tx() as c:
             node = self.get_node(weave_id, node_id)
             head_content, tail_content = self._split_content(node.content, at)
             tail = Node(
                 content=tail_content, creator=node.creator, metadata=dict(node.metadata)
             )
-            info = self.get_weave_info(weave_id)
             c.execute(
                 "UPDATE nodes SET content = ?, modified = ? WHERE id = ?",
                 (head_content.model_dump_json(), utcnow().isoformat(), node_id),
@@ -389,12 +410,9 @@ class WeaveStore:
                 (tail.id, node_id),
             )
             self._insert_edge(c, weave_id, node_id, tail.id)
-            if node_id in info.active_path:
-                i = info.active_path.index(node_id)
-                new_path = (
-                    info.active_path[: i + 1] + [tail.id] + info.active_path[i + 1 :]
-                )
-                self._set_active_path(c, weave_id, new_path)
+            for cur in self.list_cursors(weave_id).values():
+                if cur.node_id == node_id:
+                    self._upsert_cursor(c, weave_id, cur.name, tail.id, None)
             self._log_event(
                 c,
                 weave_id,
@@ -422,7 +440,7 @@ class WeaveStore:
             )
         return Snippet(text=content.text[:at]), Snippet(text=content.text[at:])
 
-    # ------------------------------------------------------------ active path
+    # ------------------------------------------------------------ cursors
 
     def _path_to_root(self, weave_id: str, node_id: str) -> list[str]:
         """Walk first-parents up to a root; returns root→node id list."""
@@ -443,34 +461,83 @@ class WeaveStore:
             path.append(current)
         return list(reversed(path))
 
-    def _set_active_path(
-        self, c: sqlite3.Connection, weave_id: str, path: list[str]
-    ) -> None:
+    def _upsert_cursor(
+        self,
+        c: sqlite3.Connection,
+        weave_id: str,
+        name: str,
+        node_id: str,
+        moved_by: str | None,
+    ) -> Cursor:
+        cur = Cursor(name=name, node_id=node_id, moved_by=moved_by)
         c.execute(
-            "UPDATE weaves SET active_path = ? WHERE id = ?",
-            (json.dumps(path), weave_id),
+            "INSERT INTO cursors (weave_id, name, node_id, updated, moved_by)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT (weave_id, name) DO UPDATE"
+            " SET node_id = excluded.node_id, updated = excluded.updated,"
+            " moved_by = excluded.moved_by",
+            (weave_id, name, node_id, cur.updated.isoformat(), moved_by),
         )
-        self._log_event(c, weave_id, "active_changed", {"active_path": path})
+        self._log_event(
+            c,
+            weave_id,
+            "cursor_moved",
+            {"name": name, "node_id": node_id, "moved_by": moved_by},
+        )
+        return cur
 
-    def set_active(self, weave_id: str, node_id: str | None) -> list[str]:
-        """Set the active path to root→node (None clears it). Returns the path."""
+    def set_cursor(
+        self, weave_id: str, name: str, node_id: str, moved_by: str | None = None
+    ) -> Cursor:
+        """Create or move the named cursor to `node_id`. Anyone may move any
+        cursor; `moved_by` records who did (for the "look here" gesture)."""
         with self._tx() as c:
-            path: list[str] = []
-            if node_id is not None:
-                self.get_node(weave_id, node_id)
-                path = self._path_to_root(weave_id, node_id)
-            else:
-                self.get_weave_info(weave_id)
-            self._set_active_path(c, weave_id, path)
-        return path
+            self.get_node(weave_id, node_id)  # validates weave + node
+            return self._upsert_cursor(c, weave_id, name, node_id, moved_by)
 
-    def get_active_thread(self, weave_id: str) -> list[Node]:
+    def delete_cursor(self, weave_id: str, name: str) -> None:
+        with self._tx() as c:
+            self.get_cursor(weave_id, name)
+            c.execute(
+                "DELETE FROM cursors WHERE weave_id = ? AND name = ?",
+                (weave_id, name),
+            )
+            self._log_event(c, weave_id, "cursor_removed", {"name": name})
+
+    def get_cursor(self, weave_id: str, name: str) -> Cursor:
         with self._lock:
-            info = self.get_weave_info(weave_id)
-            return [self.get_node(weave_id, nid) for nid in info.active_path]
+            self.get_weave_info(weave_id)
+            row = self._conn.execute(
+                "SELECT * FROM cursors WHERE weave_id = ? AND name = ?",
+                (weave_id, name),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"cursor {name!r} not found in weave {weave_id!r}")
+        return self._row_to_cursor(row)
 
-    def get_active_content(self, weave_id: str) -> str:
-        return "".join(n.text for n in self.get_active_thread(weave_id))
+    def list_cursors(self, weave_id: str) -> dict[str, Cursor]:
+        with self._lock:
+            self.get_weave_info(weave_id)
+            rows = self._conn.execute(
+                "SELECT * FROM cursors WHERE weave_id = ? ORDER BY name", (weave_id,)
+            ).fetchall()
+        return {r["name"]: self._row_to_cursor(r) for r in rows}
+
+    @staticmethod
+    def _row_to_cursor(row: sqlite3.Row) -> Cursor:
+        return Cursor(
+            name=row["name"],
+            node_id=row["node_id"],
+            updated=_dt(row["updated"]),
+            moved_by=row["moved_by"],
+        )
+
+    def get_cursor_thread(self, weave_id: str, name: str) -> list[Node]:
+        """Nodes along root→cursor for the named cursor."""
+        with self._lock:
+            cur = self.get_cursor(weave_id, name)
+            path = self._path_to_root(weave_id, cur.node_id)
+            return [self.get_node(weave_id, nid) for nid in path]
 
     def get_thread_content(self, weave_id: str, node_id: str) -> str:
         """Concatenated text along root→node (first-parent walk)."""

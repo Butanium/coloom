@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from coloom.config import ColoomConfig, ConfigError
 from coloom.inference import InferenceError, generate
-from coloom.models import Creator, HumanCreator, Node, Snippet, Weave, WeaveInfo
+from coloom.models import Creator, Cursor, HumanCreator, Node, Snippet, Weave, WeaveInfo
 from coloom.store import NotFound, WeaveStore, WeaveStoreError
 
 logger = logging.getLogger("coloom.server")
@@ -77,12 +77,13 @@ class AddNodeRequest(BaseModel):
     text: str
     parent_id: str | None = None
     creator: Creator = Field(default_factory=lambda: HumanCreator(label="anonymous"))
-    set_active: bool = False
+    move_cursor: str | None = None  # cursor name to move to the new node
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SetActiveRequest(BaseModel):
-    node_id: str | None
+class SetCursorRequest(BaseModel):
+    node_id: str
+    moved_by: str | None = None  # who moved it (the "look here" gesture when ≠ name)
 
 
 class BookmarkRequest(BaseModel):
@@ -94,13 +95,14 @@ class SplitRequest(BaseModel):
 
 
 class GenRequest(BaseModel):
-    node_id: str | None = None  # default: tip of the active path
+    node_id: str | None = None  # default: the requester's cursor (`cursor`)
+    cursor: str | None = None  # requester's cursor name
     preset: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
-    set_active: bool = False  # make the first generated node the new active tip
+    move_cursor: bool = False  # move `cursor` to the first generated node
 
 
-class ActiveResponse(BaseModel):
+class ThreadResponse(BaseModel):
     path: list[str]
     content: str
     nodes: list[Node]
@@ -161,7 +163,7 @@ def create_app(store: WeaveStore, config: ColoomConfig | None = None) -> FastAPI
                 Snippet(text=req.text),
                 creator=req.creator,
                 parent_id=req.parent_id,
-                set_active=req.set_active,
+                move_cursor=req.move_cursor,
                 metadata=req.metadata,
             )
         except NotFound as e:
@@ -202,45 +204,62 @@ def create_app(store: WeaveStore, config: ColoomConfig | None = None) -> FastAPI
         await hub.push_new()
         return {"node_id": node_id, "bookmarked": req.bookmarked}
 
-    # ------------------------------------------------------------ active path
+    # ------------------------------------------------------------ cursors
 
-    @app.get("/weaves/{weave_id}/active")
-    def get_active(weave_id: str) -> ActiveResponse:
+    @app.get("/weaves/{weave_id}/cursors")
+    def list_cursors(weave_id: str) -> dict[str, Cursor]:
         try:
-            nodes = store.get_active_thread(weave_id)
+            return store.list_cursors(weave_id)
         except NotFound as e:
             raise _404(e)
-        return ActiveResponse(
+
+    @app.put("/weaves/{weave_id}/cursors/{name}")
+    async def set_cursor(weave_id: str, name: str, req: SetCursorRequest) -> Cursor:
+        try:
+            cursor = store.set_cursor(weave_id, name, req.node_id, req.moved_by)
+        except NotFound as e:
+            raise _404(e)
+        await hub.push_new()
+        return cursor
+
+    @app.delete("/weaves/{weave_id}/cursors/{name}", status_code=204)
+    async def delete_cursor(weave_id: str, name: str) -> None:
+        try:
+            store.delete_cursor(weave_id, name)
+        except NotFound as e:
+            raise _404(e)
+        await hub.push_new()
+
+    @app.get("/weaves/{weave_id}/cursors/{name}/thread")
+    def get_cursor_thread(weave_id: str, name: str) -> ThreadResponse:
+        try:
+            nodes = store.get_cursor_thread(weave_id, name)
+        except NotFound as e:
+            raise _404(e)
+        return ThreadResponse(
             path=[n.id for n in nodes],
             content="".join(n.text for n in nodes),
             nodes=nodes,
         )
 
-    @app.put("/weaves/{weave_id}/active")
-    async def set_active(weave_id: str, req: SetActiveRequest) -> dict[str, list[str]]:
-        try:
-            path = store.set_active(weave_id, req.node_id)
-        except NotFound as e:
-            raise _404(e)
-        await hub.push_new()
-        return {"path": path}
-
     # ------------------------------------------------------------ generation
 
     @app.post("/weaves/{weave_id}/gen", status_code=201)
     async def gen(weave_id: str, req: GenRequest) -> list[Node]:
-        try:
-            info = store.get_weave_info(weave_id)
-        except NotFound as e:
-            raise _404(e)
+        if req.move_cursor and req.cursor is None:
+            raise HTTPException(
+                status_code=400, detail="move_cursor requires a cursor name"
+            )
         parent_id = req.node_id
         if parent_id is None:
-            if not info.active_path:
+            if req.cursor is None:
                 raise HTTPException(
-                    status_code=400,
-                    detail="no node_id given and the weave has no active path",
+                    status_code=400, detail="give a node_id or a cursor name"
                 )
-            parent_id = info.active_path[-1]
+            try:
+                parent_id = store.get_cursor(weave_id, req.cursor).node_id
+            except NotFound as e:
+                raise _404(e)
         try:
             prompt = store.get_thread_content(weave_id, parent_id)
             endpoint, params = config.resolve_preset(req.preset)
@@ -261,7 +280,7 @@ def create_app(store: WeaveStore, config: ColoomConfig | None = None) -> FastAPI
                         node.content,
                         creator=node.creator,
                         parent_id=parent_id,
-                        set_active=req.set_active and i == 0,
+                        move_cursor=req.cursor if req.move_cursor and i == 0 else None,
                         metadata=node.metadata,
                     )
                 )

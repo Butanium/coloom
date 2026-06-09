@@ -3,8 +3,10 @@
 JSON on stdout, logs on stderr, non-interactive. Designed so an agent can run
 `read` → `gen`/`add` → `events --since CURSOR` loops against a live weave.
 
-Server URL: --server or $COLOOM_SERVER (default http://127.0.0.1:4444).
-Weave id:   --weave  or $COLOOM_WEAVE (so a session can be pinned once).
+Server URL:  --server or $COLOOM_SERVER (default http://127.0.0.1:4444).
+Weave id:    --weave  or $COLOOM_WEAVE (so a session can be pinned once).
+Cursor name: --cursor or $COLOOM_CURSOR (default "default") — your named position
+in the weave; `read` and `gen` use it, `cursor set` moves it (or anyone else's).
 """
 
 from __future__ import annotations
@@ -70,7 +72,7 @@ def cmd_new(client: Client, args: argparse.Namespace) -> None:
             json={
                 "text": args.text,
                 "creator": {"type": "human", "label": args.as_label},
-                "set_active": True,
+                "move_cursor": args.cursor,
             },
         )
     out(result)
@@ -87,11 +89,11 @@ def cmd_read(client: Client, args: argparse.Namespace) -> None:
     elif args.tree:
         out(client.request("GET", f"/weaves/{wid}"))
     else:
-        active = client.request("GET", f"/weaves/{wid}/active")
+        thread = client.request("GET", f"/weaves/{wid}/cursors/{args.cursor}/thread")
         if args.text:
-            sys.stdout.write(active["content"])
+            sys.stdout.write(thread["content"])
         else:
-            out(active)
+            out(thread)
 
 
 def cmd_add(client: Client, args: argparse.Namespace) -> None:
@@ -107,16 +109,29 @@ def cmd_add(client: Client, args: argparse.Namespace) -> None:
                 "text": text,
                 "parent_id": args.parent,
                 "creator": {"type": args.creator_type, "label": args.as_label},
-                "set_active": args.set_active,
+                "move_cursor": args.cursor if args.move_cursor else None,
             },
         )
     )
 
 
-def cmd_set_active(client: Client, args: argparse.Namespace) -> None:
+def cmd_cursor(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
-    node_id = None if args.node_id == "none" else args.node_id
-    out(client.request("PUT", f"/weaves/{wid}/active", json={"node_id": node_id}))
+    if args.cursor_command == "list":
+        out(client.request("GET", f"/weaves/{wid}/cursors"))
+    elif args.cursor_command == "set":
+        name = args.name or args.cursor
+        out(
+            client.request(
+                "PUT",
+                f"/weaves/{wid}/cursors/{name}",
+                json={"node_id": args.node_id, "moved_by": args.cursor},
+            )
+        )
+    else:  # rm
+        name = args.name or args.cursor
+        client.request("DELETE", f"/weaves/{wid}/cursors/{name}")
+        out({"removed": name})
 
 
 def cmd_gen(client: Client, args: argparse.Namespace) -> None:
@@ -138,9 +153,10 @@ def cmd_gen(client: Client, args: argparse.Namespace) -> None:
             f"/weaves/{wid}/gen",
             json={
                 "node_id": args.node,
+                "cursor": args.cursor,
                 "preset": args.preset,
                 "params": params,
-                "set_active": args.set_active,
+                "move_cursor": args.move_cursor,
             },
         )
     )
@@ -189,19 +205,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--weave", default=os.environ.get("COLOOM_WEAVE"), help="weave id"
     )
+    parser.add_argument(
+        "--cursor",
+        default=os.environ.get("COLOOM_CURSOR", "default"),
+        help="your cursor name (your named position in the weave)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("new", help="create a weave (optionally with a root node)")
     p.add_argument("--title", default="Untitled weave")
     p.add_argument("--description", default="")
-    p.add_argument("--text", help="root node text (set active)")
+    p.add_argument("--text", help="root node text (your cursor moves there)")
     p.add_argument("--as", dest="as_label", default="human", help="creator label")
     p.set_defaults(func=cmd_new)
 
     p = sub.add_parser("list", help="list weaves")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("read", help="read active thread (default), tree, or node")
+    p = sub.add_parser("read", help="read your cursor's thread (default), tree, or node")
     group = p.add_mutually_exclusive_group()
     group.add_argument("--tree", action="store_true", help="full weave snapshot")
     group.add_argument("--node", help="single node by id")
@@ -212,7 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--parent", help="parent node id (omit for a new root)")
     p.add_argument("--text")
     p.add_argument("--stdin", action="store_true", help="read text from stdin")
-    p.add_argument("--set-active", action="store_true")
+    p.add_argument(
+        "--move-cursor", action="store_true", help="move your cursor to the new node"
+    )
     p.add_argument("--as", dest="as_label", default="human", help="creator label")
     p.add_argument(
         "--creator-type",
@@ -222,17 +245,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_add)
 
-    p = sub.add_parser(
-        "set-active", help="set active path to root→node ('none' clears)"
+    p = sub.add_parser("cursor", help="list / set / rm named cursors")
+    cursor_sub = p.add_subparsers(dest="cursor_command", required=True)
+    cp = cursor_sub.add_parser("list", help="all cursors in the weave")
+    cp = cursor_sub.add_parser(
+        "set", help="move a cursor (yours by default; --name for someone else's)"
     )
-    p.add_argument("node_id")
-    p.set_defaults(func=cmd_set_active)
+    cp.add_argument("node_id")
+    cp.add_argument("--name", help="cursor to move (default: your own)")
+    cp = cursor_sub.add_parser("rm", help="remove a cursor")
+    cp.add_argument("--name", help="cursor to remove (default: your own)")
+    p.set_defaults(func=cmd_cursor)
 
     p = sub.add_parser("gen", help="generate branches from a node via the base model")
-    p.add_argument("--node", help="parent node id (default: active tip)")
+    p.add_argument("--node", help="parent node id (default: your cursor)")
     p.add_argument("--preset", help="named preset from the server config")
     p.add_argument("-n", type=int, help="number of completions")
-    p.add_argument("--set-active", action="store_true")
+    p.add_argument(
+        "--move-cursor",
+        action="store_true",
+        help="move your cursor to the first generated node",
+    )
     p.add_argument(
         "--param",
         action="append",

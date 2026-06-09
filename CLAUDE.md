@@ -35,7 +35,9 @@ logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live WebSocket e
 - No Rust, no `.tapestry` interop. Our own weave format, *inspired by* Tapestry Loom's v1 design.
 
 ## Weave model (sketch)
-Nodes with stable ids, parent/child links (DAG-capable for merges), an active path, roots, bookmarks.
+Nodes with stable ids, parent/child links (DAG-capable for merges), roots, bookmarks, and **named
+cursors** instead of a single active path: each participant keeps a cursor (its thread derived
+root→node), and anyone may move anyone's cursor — the "look here" gesture (`moved_by` records who).
 Node content is either a text `Snippet` or typed `Tokens` (`{text, logprob, token_id?, entropy?,
 top_logprobs[]}`). Each node carries a `Creator` — `Human` or `Model` (with seed + raw request/response)
 — for human-vs-agent attribution. See `docs/PLAN.md` for the full schema.

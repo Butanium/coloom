@@ -56,7 +56,7 @@ edits live.
 
 ## Weave model (our own; inspired by Tapestry Loom v1)
 
-A weave = nodes + roots + active path + bookmarks + metadata.
+A weave = nodes + roots + cursors + bookmarks + metadata.
 
 - **Node**: `{ id, parents: [id], children: [id], content, creator, timestamp, modified, bookmarked, metadata }`.
   Allow multiple parents (DAG) to support merges later; tree is the common case.
@@ -67,17 +67,22 @@ A weave = nodes + roots + active path + bookmarks + metadata.
 - **creator**: `Human{ label, color?, id? }` | `Model{ label, color?, id?, seed?, raw_request?, raw_response? }`
   | `Unknown`. This is the human-vs-agent attribution; `Model` optionally stores the seed + raw API exchange
   for reproducibility.
-- **Weave**: `{ id, nodes, roots: [id], active_path: [id], bookmarks: [id], metadata: {title, description, created} }`.
-- **active path** = the currently-selected root→leaf thread; `get_active_content()` = concatenated text.
+- **Weave**: `{ id, nodes, roots: [id], cursors: {name: Cursor}, bookmarks: [id], metadata: {title, description, created} }`.
+- **Cursor**: `{ name, node_id, updated, moved_by? }` — a named position per participant. **Replaces the
+  single active path** (decided 2026-06-09): Tapestry's "clicking = re-routing the active thread" is fine
+  single-user, but with two live participants a shared focus means navigation fights. Instead each
+  participant keeps a cursor, threads are derived (root→node is unique in a tree), and anyone may move
+  anyone's cursor — moving someone else's is the "hey, look here" gesture (`moved_by` records who). How
+  rudely a client reacts to its cursor being moved is client-side policy, not backend state.
 
 Stored in SQLite (a `nodes` table keyed by id with parent/child edges + JSON content/creator columns,
-a `weave` row for metadata/active/roots/bookmarks). Exposed/exported as JSON.
+a `weave` row for metadata/roots/bookmarks, a `cursors` table). Exposed/exported as JSON.
 
 ## Backend: `core`
 
 Pure Python library (no web framework), unit-testable:
-- **Weave store**: load/save against SQLite; CRUD on nodes; `add_node`, `set_active`, `get_active_content`,
-  `get_active_thread`, `split_node`, `remove_node`, bookmarks, roots. Mirror the useful ops from Tapestry
+- **Weave store**: load/save against SQLite; CRUD on nodes; `add_node`, `set_cursor`, `get_cursor_thread`,
+  `get_thread_content`, `split_node`, `remove_node`, bookmarks, roots. Mirror the useful ops from Tapestry
   Loom's `v0::TapestryWeave` API (as behavioral reference, reimplemented in Python).
 - **Inference client**: `generate(endpoint_config, prompt, sampling_params) -> [Node]`. Builds the
   `/v1/completions` request (model, temp/top_p/top_k/min_p, max_tokens, n, logprobs), POSTs via httpx,
@@ -89,16 +94,18 @@ Pure Python library (no web framework), unit-testable:
 ## Backend: `server` (the authority)
 
 - FastAPI app holding open weaves in memory (canonical), persisting to SQLite (debounced + on change).
-- **REST**: get tree / node / active-thread; `POST gen` (generate from a node); `POST add` (manual branch);
-  `PUT active`; bookmarks; create/list weaves.
-- **WebSocket**: broadcast change events (`node_added`, `active_changed`, `node_removed`, …) to all clients,
+- **REST**: get tree / node / cursor thread; `POST gen` (generate from a node, or from your cursor);
+  `POST add` (manual branch); cursors (list / `PUT cursors/{name}` / delete); bookmarks; create/list weaves.
+- **WebSocket**: broadcast change events (`node_added`, `cursor_moved`, `node_removed`, …) to all clients,
   so the web UI and any agent CLI see edits in real time. Only the server writes persistence.
 
 ## CLI (`coloom`)
 
 HTTP client to the server. JSON on stdout, logs on stderr, non-interactive, exit codes.
-- `read [--active|--tree|--node ID] [--text]`, `add --parent ID [--text|--stdin] [--set-active]`,
-  `set-active ID`, `gen [--node ID] [--preset NAME] [-n N]`, `new [--text]`.
+- `read [--tree|--node ID] [--text]` (default: your cursor's thread), `add --parent ID
+  [--text|--stdin] [--move-cursor]`, `cursor list|set|rm`, `gen [--node ID] [--preset NAME] [-n N]
+  [--move-cursor]` (default parent: your cursor), `new [--text]`. Cursor identity: `--cursor` /
+  `$COLOOM_CURSOR` (free-form names, trust the room — no auth for now).
 - `events --since <cursor>` — poll change events newer than the last look, so a non-resident agent can
   catch up on what the human (or another agent) did without holding a WebSocket open.
 - (Later) `bookmark`, `rm`, `list-leaves`, logprob export; an MCP wrapper so agents get native tool access.
