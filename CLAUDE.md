@@ -5,7 +5,7 @@ tree of completions (with per-token logprobs) that a human and an agent weave *t
 
 **Status: backend milestones 1–5 done** (2026-06-09): weave model + SQLite store, inference with
 logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live WebSocket events. 40 tests in
-`tests/` (`uv run pytest`). The web UI (separate repo) is next. Design rationale in
+`tests/` (`uv run pytest`). The web UI (in-repo `web/`, Vite + Svelte) is next. Design rationale in
 [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Layout
@@ -30,7 +30,8 @@ logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live WebSocket e
   Dev/test endpoint: OpenAI API with `gpt4-base` (key in repo-local `.env`); llama.cpp
   `llama-server` and vLLM also first-class targets.
 - **CLI** (`coloom`): Python, agent-facing — JSON in/out, non-interactive, an HTTP client to the server.
-- **Web frontend**: TypeScript SPA, **separate repo**, on the server's REST + WS.
+- **Web frontend**: TypeScript SPA — **Vite + Svelte, in-repo under `web/`** (no SvelteKit) — on
+  the server's REST + WS; FastAPI serves the built `web/dist/`.
 - No Rust, no `.tapestry` interop. Our own weave format, *inspired by* Tapestry Loom's v1 design.
 
 ## Weave model (sketch)

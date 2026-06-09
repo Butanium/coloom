@@ -19,7 +19,7 @@ on one shared weave.
 > [!NOTE]
 > **Status: first thread on the loom.** The backend works end-to-end: weave store, generation
 > with per-token logprobs, server, agent CLI, live WebSocket events — all five backend milestones
-> of [`docs/PLAN.md`](docs/PLAN.md). The web UI (sibling repo) is next. Weave with us.
+> of [`docs/PLAN.md`](docs/PLAN.md). The web UI (Svelte, `web/`) is next. Weave with us.
 
 ## Quick start
 
@@ -75,7 +75,8 @@ tension and lets you both throw the shuttle.
   and broadcasts changes over WebSocket; SQLite for storage; `httpx` for inference against any
   OpenAI-compatible `/v1/completions` endpoint with logprobs (llama.cpp `llama-server`, vLLM).
 - **CLI** (`coloom`) — Python, agent-facing: `read`, `gen`, `add`, `set-active`, … as a thin client.
-- **Web frontend** — TypeScript, in a sibling repo, on the same API.
+- **Web frontend** — TypeScript (Vite + Svelte), in `web/`, on the same API; served by the
+  server once built, so one process is the whole loom.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the weave schema, the build sequence, and design notes.
 

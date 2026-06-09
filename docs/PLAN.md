@@ -7,7 +7,13 @@
 > at char offsets — not byte offsets (sidesteps Tapestry's mid-token logprob-duplication
 > machinery); text stored as `str` not bytes (JSON/web-native). Tapestry's sibling-dedup-on-add
 > and `set_active_content` (diff-style editing of the flattened active text) are noted as
-> post-milestone features. Milestone 6 (web frontend, sibling repo) is next.
+> post-milestone features. Milestone 6 (web frontend) is next.
+>
+> **Decision 2026-06-09 (supersedes "separate repo" below): the web frontend lives in THIS repo,
+> under `web/`** — a Vite + Svelte SPA (no SvelteKit; no SSR/routing needs). Rationale: the
+> frontend is tightly coupled to the API and the team is one human + one agent, so cross-repo
+> coordination is pure friction; colocating lets e2e tests drive server+UI together and lets
+> FastAPI serve the built `web/dist/`, making `coloom-server` a single self-contained deployable.
 
 ## Context
 
@@ -45,7 +51,8 @@ edits live.
   (special access; `OPENAI_API_KEY` in the repo-local `.env`). llama.cpp `llama-server` and vLLM are
   the other first-class targets.
 - **CLI**: Python (`click`/argparse), an HTTP client to the server (primary), JSON in/out, non-interactive.
-- **Web frontend**: TypeScript SPA, **separate repo**, consuming the server's REST + WS.
+- **Web frontend**: TypeScript SPA — **Vite + Svelte, in-repo under `web/`** (decision 2026-06-09;
+  originally planned as a separate repo) — consuming the server's REST + WS.
 
 ## Weave model (our own; inspired by Tapestry Loom v1)
 
@@ -96,11 +103,11 @@ HTTP client to the server. JSON on stdout, logs on stderr, non-interactive, exit
   catch up on what the human (or another agent) did without holding a WebSocket open.
 - (Later) `bookmark`, `rm`, `list-leaves`, logprob export; an MCP wrapper so agents get native tool access.
 
-## Web frontend (separate repo, later)
+## Web frontend (`web/`, Vite + Svelte)
 
 TS SPA on the server's REST + WS: tree/graph view, active-path editing, per-token logprob/confidence
-display, human-vs-agent node coloring (from `creator`), live updates. Out of scope beyond ensuring the
-server API supports it.
+display, human-vs-agent node coloring (from `creator`), live updates. FastAPI serves the built
+`web/dist/` so `coloom-server` ships the UI.
 
 **When viewer work starts**: have a teammate/subagent audit the full Tapestry-Loom viewer feature set
 (`src/editor/`, `Getting Started.md`, README roadmap) so we consciously pick features rather than
@@ -114,7 +121,7 @@ rediscover them — Tapestry Loom is the feature baseline for the viewer (Cléme
 3. **Server**: FastAPI REST over `core`; SQLite persistence.
 4. **CLI**: client commands against the server; the agent co-weave loop (`read` → `gen`/`add` → observe).
 5. **Live events**: WebSocket broadcast; two clients observe each other's edits.
-6. **Web frontend** (separate repo) on the API.
+6. **Web frontend** (`web/`, Vite + Svelte) on the API.
 7. (Later) chat-completions inference, merges/multi-parent, MCP wrapper, JSON import of others' looms.
 
 ## Verification
@@ -171,7 +178,8 @@ insertions), **blind comparison modes**, and **adaptive looming** (uncertainty-b
 cutting). Listed here so future sessions don't re-propose them.
 
 ## Notes / open items (non-blocking)
-- Repo: `coloom`, public, on Butanium (github.com/Butanium/coloom); web frontend a sibling repo.
+- Repo: `coloom`, public, on Butanium (github.com/Butanium/coloom); web frontend in-repo under
+  `web/` (2026-06-09, superseding the earlier sibling-repo plan).
 - Maintainer reply may open future collaboration, but does not change this plan.
 - SQLite vs flat-JSON persistence: SQLite chosen for partial updates at scale (weaves reach tens of MB,
   mostly token logprobs); revisit if it adds friction early.
