@@ -3,11 +3,26 @@
 Real-time **human + AI agent collaborative looming** over LLM base models: a shared, branching
 tree of completions (with per-token logprobs) that a human and an agent weave *together*, live.
 
-**Status: day zero.** This repo currently holds the README, license, and the design plan. No
-application code yet. The full design + build sequence lives in [`docs/PLAN.md`](docs/PLAN.md) —
-read it first.
+**Status: backend milestones 1–5 done** (2026-06-09): weave model + SQLite store, inference with
+logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live WebSocket events. 40 tests in
+`tests/` (`uv run pytest`). The web UI (separate repo) is next. Design rationale in
+[`docs/PLAN.md`](docs/PLAN.md).
 
-## Stack (planned)
+## Layout
+- `src/coloom/models.py` — pydantic weave model (Node, Snippet/Tokens, Creator attribution)
+- `src/coloom/store.py` — SQLite weave store, **directly canonical** (every mutation a transaction;
+  deliberate deviation from PLAN's in-memory+debounce idea). Edges in their own table → DAG-ready.
+  Also the append-only `events` table (the WS/polling change feed).
+- `src/coloom/inference.py` + `config.py` — httpx `/v1/completions` client with the
+  polyparser-derived edge-case handling; YAML endpoints/presets (`coloom.example.yaml`)
+- `src/coloom/server/` — FastAPI REST + `/ws` EventHub; `uv run coloom-server`
+- `src/coloom/cli.py` — agent-facing CLI (`uv run coloom …`), JSON stdout / logs stderr
+- `scripts/small-smokes/` — live smokes against gpt4-base (`smoke_generate.py`,
+  `smoke_coweave_e2e.py`); re-run when the pipeline changes
+- `tests/fixtures/gpt4base_completion.json` — captured real response driving parser + server tests
+  (fun fact: gpt4-base self-reports as `gpt-4-0314`)
+
+## Stack
 - **Backend** (`core` + `server`): Python, `uv`, FastAPI (REST) + WebSocket for change events.
   The server owns the canonical weave and pushes change events so every client stays in sync.
 - **Persistence**: SQLite (nodes/edges/metadata; partial updates). JSON for the API + export.

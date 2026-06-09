@@ -1,5 +1,14 @@
 # Plan: `coloom` — an agent-human co-weaving tool (Python + TS)
 
+> **Status 2026-06-09: milestones 1–5 implemented** (model+store, inference, server, CLI, live
+> events; 40 tests + live gpt4-base smokes). Deliberate implementation deviations: SQLite is
+> directly canonical (no in-memory + debounced layer — fewer crash/sync failure modes, partial
+> updates are what SQLite is for); `Tokens` nodes split at **token boundaries** (index), Snippets
+> at char offsets — not byte offsets (sidesteps Tapestry's mid-token logprob-duplication
+> machinery); text stored as `str` not bytes (JSON/web-native). Tapestry's sibling-dedup-on-add
+> and `set_active_content` (diff-style editing of the flattened active text) are noted as
+> post-milestone features. Milestone 6 (web frontend, sibling repo) is next.
+
 ## Context
 
 Goal: a tool where a **human and an AI agent collaborate in real time on the same "loom"** — a

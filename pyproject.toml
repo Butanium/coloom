@@ -1,0 +1,37 @@
+[project]
+name = "coloom"
+version = "0.1.0"
+description = "A loom for human + AI co-weaving: a shared, branching tree of base-model completions"
+readme = "README.md"
+authors = [
+    { name = "Clement Dumas", email = "clement.dumas@ens-paris-saclay.fr" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.48.0",
+    "websockets>=16.0",
+]
+
+[project.scripts]
+coloom = "coloom.cli:main"
+coloom-server = "coloom.server.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.15.15",
+]
+
+[tool.pytest.ini_options]
+timeout = 60
+asyncio_mode = "auto"

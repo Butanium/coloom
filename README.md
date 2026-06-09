@@ -17,8 +17,26 @@ with per-token logprobs — designed from the ground up for **real-time human + 
 on one shared weave.
 
 > [!NOTE]
-> **Status: day zero.** This repo holds the design and intent; the code isn't written yet.
-> The full plan lives in [`docs/PLAN.md`](docs/PLAN.md). Watch this space — or weave with us.
+> **Status: first thread on the loom.** The backend works end-to-end: weave store, generation
+> with per-token logprobs, server, agent CLI, live WebSocket events — all five backend milestones
+> of [`docs/PLAN.md`](docs/PLAN.md). The web UI (sibling repo) is next. Weave with us.
+
+## Quick start
+
+```bash
+uv sync
+cp coloom.example.yaml coloom.yaml      # point it at your endpoint / key
+uv run coloom-server                    # the loom, on :4444
+
+# in another shell — weave:
+uv run coloom new --title "story" --text "Once upon a loom" --as you
+uv run coloom --weave <id> gen -n 3 --set-active   # base-model branches, logprobs and all
+uv run coloom --weave <id> read --text
+uv run coloom --weave <id> events --since 0        # what changed while you were away
+```
+
+Every change the server makes is also pushed live over `ws://…/ws?weave_id=<id>`, so clients
+watch each other weave in real time.
 
 ## The metaphor
 
@@ -43,7 +61,7 @@ tension and lets you both throw the shuttle.
 - **Agent-native.** The CLI is built for an AI to drive: JSON in, JSON out, no prompts. Point your
   agent at the same loom you're sitting at and weave together.
 
-## How it'll work
+## How it works
 
 ```
                        ┌─────────────────────────────────┐
