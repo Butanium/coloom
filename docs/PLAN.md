@@ -32,7 +32,9 @@ edits live.
 - **Persistence**: **SQLite** (nodes/edges/metadata; transactional, cheap partial updates, no full-file
   rewrites). JSON for API payloads and import/export.
 - **Inference**: Python `httpx` against OpenAI-compatible `/v1/completions` (+ chat) with logprobs;
-  parse `logprobs`/`top_logprobs`/token ids. Target **llama.cpp `llama-server`** and **vLLM** first.
+  parse `logprobs`/`top_logprobs`/token ids. **Dev/test endpoint: the OpenAI API with `gpt4-base`**
+  (special access; `OPENAI_API_KEY` in the repo-local `.env`). llama.cpp `llama-server` and vLLM are
+  the other first-class targets.
 - **CLI**: Python (`click`/argparse), an HTTP client to the server (primary), JSON in/out, non-interactive.
 - **Web frontend**: TypeScript SPA, **separate repo**, consuming the server's REST + WS.
 
@@ -81,6 +83,8 @@ Pure Python library (no web framework), unit-testable:
 HTTP client to the server. JSON on stdout, logs on stderr, non-interactive, exit codes.
 - `read [--active|--tree|--node ID] [--text]`, `add --parent ID [--text|--stdin] [--set-active]`,
   `set-active ID`, `gen [--node ID] [--preset NAME] [-n N]`, `new [--text]`.
+- `events --since <cursor>` — poll change events newer than the last look, so a non-resident agent can
+  catch up on what the human (or another agent) did without holding a WebSocket open.
 - (Later) `bookmark`, `rm`, `list-leaves`, logprob export; an MCP wrapper so agents get native tool access.
 
 ## Web frontend (separate repo, later)
@@ -88,6 +92,10 @@ HTTP client to the server. JSON on stdout, logs on stderr, non-interactive, exit
 TS SPA on the server's REST + WS: tree/graph view, active-path editing, per-token logprob/confidence
 display, human-vs-agent node coloring (from `creator`), live updates. Out of scope beyond ensuring the
 server API supports it.
+
+**When viewer work starts**: have a teammate/subagent audit the full Tapestry-Loom viewer feature set
+(`src/editor/`, `Getting Started.md`, README roadmap) so we consciously pick features rather than
+rediscover them — Tapestry Loom is the feature baseline for the viewer (Clément's call, 2026-06-09).
 
 ## Build sequence / milestones
 
@@ -104,9 +112,9 @@ server API supports it.
 
 - **Model**: pytest round-trips (create → add branches → set active → reload) asserting tree shape,
   active thread, attribution.
-- **Inference**: run `llama.cpp llama-server` with a small base GGUF on truthful-1 (CPU; slow but fine for a
-  smoke) exposing `/v1/completions` with logprobs; `core.generate` and assert the node has per-token
-  logprobs + top_logprobs populated. Capture a sample response and add a parser unit test (llama.cpp + vLLM).
+- **Inference**: smoke `core.generate` against the OpenAI API with `gpt4-base` (key in `.env`); assert the
+  node has per-token logprobs + top_logprobs populated. Capture a sample response and add a parser unit
+  test (add llama.cpp / vLLM sample fixtures when we first point at those). Smoke prompts: anything fun.
 - **Server + WS**: start server; two `coloom --server` clients; A `add`s, assert B receives the WS event
   and SQLite reflects it.
 - **End-to-end**: agent generates a branch via CLI while a second client (or the web UI later) sees it live.
@@ -141,10 +149,17 @@ What I never opened (genuinely unexplored — maybe the most interesting):
 - `Getting Started.md` — intended mental model / interaction patterns; probably worth reading before UI design.
 - `migration-assistant/src/` — converters from loom/loomsidian/exoloom/pyloom; reference for a future
   "import other looms" feature.
-- The README **roadmap** (on `new-format`) — feature backlog (FIM, `TL#` request post-processing, adaptive
-  looming, sorting, blind-comparison, stats) + "take inspiration from multiverse/mikupad/loom". Cherry-pick.
+- The README **roadmap** (on `new-format`) — feature backlog (`TL#` request post-processing, sorting,
+  stats) + "take inspiration from multiverse/mikupad/loom". Cherry-pick. (FIM, blind comparison, and
+  adaptive looming were reviewed and ruled out — see "Out of scope" below.)
 
 You'll likely form sharper opinions by poking around yourself — these notes are to skip the cold-start, not to fence you in.
+
+## Out of scope (decided 2026-06-09)
+
+From the Tapestry-Loom roadmap, explicitly **not** wanted for coloom: **FIM** (fill-in-the-middle
+insertions), **blind comparison modes**, and **adaptive looming** (uncertainty-based node-length
+cutting). Listed here so future sessions don't re-propose them.
 
 ## Notes / open items (non-blocking)
 - Repo: `coloom`, public, on Butanium (github.com/Butanium/coloom); web frontend a sibling repo.

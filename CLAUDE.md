@@ -11,8 +11,9 @@ read it first.
 - **Backend** (`core` + `server`): Python, `uv`, FastAPI (REST) + WebSocket for change events.
   The server owns the canonical weave and pushes change events so every client stays in sync.
 - **Persistence**: SQLite (nodes/edges/metadata; partial updates). JSON for the API + export.
-- **Inference**: `httpx` against OpenAI-compatible `/v1/completions` (+ chat) with logprobs
-  (llama.cpp `llama-server`, vLLM first).
+- **Inference**: `httpx` against OpenAI-compatible `/v1/completions` (+ chat) with logprobs.
+  Dev/test endpoint: OpenAI API with `gpt4-base` (key in repo-local `.env`); llama.cpp
+  `llama-server` and vLLM also first-class targets.
 - **CLI** (`coloom`): Python, agent-facing — JSON in/out, non-interactive, an HTTP client to the server.
 - **Web frontend**: TypeScript SPA, **separate repo**, on the server's REST + WS.
 - No Rust, no `.tapestry` interop. Our own weave format, *inspired by* Tapestry Loom's v1 design.
