@@ -3,13 +3,18 @@
 Real-time **human + AI agent collaborative looming** over LLM base models: a shared, branching
 tree of completions (with per-token logprobs) that a human and an agent weave *together*, live.
 
-**Status: backend milestones 1–5 done** (2026-06-09): weave model + SQLite store, inference with
-logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live WebSocket events. 40 tests in
-`tests/` (`uv run pytest`). The web UI (in-repo `web/`, Vite + Svelte) is next. Design rationale in
-[`docs/PLAN.md`](docs/PLAN.md).
+**Status: backend milestones 1–5 done + cursor model + web scaffold** (2026-06-09): weave model +
+SQLite store, inference with logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live
+WebSocket events; **named cursors replaced the single active path** (per-participant positions,
+anyone can move anyone's — see PLAN's weave model for the why). 52 tests (`uv run pytest`).
+`web/` is scaffolded (Vite + Svelte 5 + TS, dev proxy verified) but the actual UI is **next**:
+start from [`docs/tapestry-viewer-audit.md`](docs/tapestry-viewer-audit.md) (the 27-feature core
+set) — first slice: weave picker → canvas tree + cursor-thread text pane. Pull
+`svelte.dev/docs/svelte/llms.txt` into `~/docs/svelte/` before UI work (Svelte 5 runes are
+post-cutoff). Design rationale in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Layout
-- `src/coloom/models.py` — pydantic weave model (Node, Snippet/Tokens, Creator attribution)
+- `src/coloom/models.py` — pydantic weave model (Node, Snippet/Tokens, Creator attribution, Cursor)
 - `src/coloom/store.py` — SQLite weave store, **directly canonical** (every mutation a transaction;
   deliberate deviation from PLAN's in-memory+debounce idea). Edges in their own table → DAG-ready.
   Also the append-only `events` table (the WS/polling change feed).
@@ -19,6 +24,10 @@ logprobs (smoked against gpt4-base), FastAPI server, agent CLI, live WebSocket e
 - `src/coloom/cli.py` — agent-facing CLI (`uv run coloom …`), JSON stdout / logs stderr
 - `scripts/small-smokes/` — live smokes against gpt4-base (`smoke_generate.py`,
   `smoke_coweave_e2e.py`); re-run when the pipeline changes
+- `web/` — Vite + Svelte 5 + TS SPA scaffold; dev proxy to :4444 (`COLOOM_SERVER` overridable);
+  `npm run dev|build|check` from `web/`
+- `docs/tapestry-viewer-audit.md` — full Tapestry-Loom viewer feature audit (core/later/skip),
+  the conscious feature baseline for the web UI
 - `tests/fixtures/gpt4base_completion.json` — captured real response driving parser + server tests
   (fun fact: gpt4-base self-reports as `gpt-4-0314`)
 
