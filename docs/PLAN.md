@@ -1,4 +1,4 @@
-# Plan: `tapestry-collab` — an agent-human co-weaving tool (Python + TS)
+# Plan: `coloom` — an agent-human co-weaving tool (Python + TS)
 
 ## Context
 
@@ -76,7 +76,7 @@ Pure Python library (no web framework), unit-testable:
 - **WebSocket**: broadcast change events (`node_added`, `active_changed`, `node_removed`, …) to all clients,
   so the web UI and any agent CLI see edits in real time. Only the server writes persistence.
 
-## CLI (`tapestry`)
+## CLI (`coloom`)
 
 HTTP client to the server. JSON on stdout, logs on stderr, non-interactive, exit codes.
 - `read [--active|--tree|--node ID] [--text]`, `add --parent ID [--text|--stdin] [--set-active]`,
@@ -107,7 +107,7 @@ server API supports it.
 - **Inference**: run `llama.cpp llama-server` with a small base GGUF on truthful-1 (CPU; slow but fine for a
   smoke) exposing `/v1/completions` with logprobs; `core.generate` and assert the node has per-token
   logprobs + top_logprobs populated. Capture a sample response and add a parser unit test (llama.cpp + vLLM).
-- **Server + WS**: start server; two `tapestry --server` clients; A `add`s, assert B receives the WS event
+- **Server + WS**: start server; two `coloom --server` clients; A `add`s, assert B receives the WS event
   and SQLite reflects it.
 - **End-to-end**: agent generates a branch via CLI while a second client (or the web UI later) sees it live.
 
@@ -147,7 +147,7 @@ What I never opened (genuinely unexplored — maybe the most interesting):
 You'll likely form sharper opinions by poking around yourself — these notes are to skip the cold-start, not to fence you in.
 
 ## Notes / open items (non-blocking)
-- Repo: `tapestry-collab` (or new name), private, TruthfulAI-research; web frontend a sibling repo.
+- Repo: `coloom`, public, on Butanium (github.com/Butanium/coloom); web frontend a sibling repo.
 - Maintainer reply may open future collaboration, but does not change this plan.
 - SQLite vs flat-JSON persistence: SQLite chosen for partial updates at scale (weaves reach tens of MB,
   mostly token logprobs); revisit if it adds friction early.
