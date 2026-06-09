@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Node / web frontend (if colocated)
+node_modules/
+dist/
+.vite/
+
+# Data / local weave stores
+*.sqlite
+*.sqlite3
+*.db
+/data/
+/scratch/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
