@@ -8,6 +8,7 @@ Effects are verified through the REST API (the `api` fixture), not the DOM alone
 """
 
 import json
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -479,6 +480,67 @@ def test_generator_menu_hide_and_multi_active_presets(page_as, api, weave):
     # unhide restores it
     page.get_by_test_id(f"menu-hide-preset-{presets[0]}").click()
     expect(page.locator(".generators .chip")).to_have_count(before)
+
+
+def test_activating_hidden_generator_unhides_its_chip(page_as, api, weave):
+    """Activating a hidden generator from the menu also un-hides it — an
+    active-but-invisible chip would be confusing."""
+    page = page_as("uitest-clement", weave)
+    presets = list(api.get("/presets").json()["presets"])
+    chip = page.get_by_test_id(f"gc-preset-{presets[0]}")
+    expect(chip).to_be_visible()
+    # hide it while inactive
+    page.get_by_test_id("open-gen-menu").click()
+    page.get_by_test_id(f"menu-hide-preset-{presets[0]}").click()
+    expect(chip).to_have_count(0)
+    # activate it from the menu checkbox → chip reappears, active
+    page.get_by_test_id(f"menu-active-preset-{presets[0]}").check()
+    expect(chip).to_be_visible()
+    expect(chip).to_have_class(re.compile(r"\bactive\b"))
+    # and the menu row no longer renders as hidden
+    expect(page.get_by_test_id(f"menu-hide-preset-{presets[0]}")).to_have_text("hide")
+
+
+def test_param_inputs_drag_to_adjust(page_as, api, weave):
+    """temp/max_tokens/n support Tapestry-style drag-to-adjust: press + drag
+    right increases, left decreases (clamped at the min); a plain click still
+    focuses the input for typing."""
+    page = page_as("uitest-clement", weave)
+    temp = page.get_by_test_id("param-temp")
+    temp.fill("1")
+    temp.dispatch_event("change")
+
+    box = temp.bounding_box()
+    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    # drag right 50px → +0.5 at speed 0.01/px
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    page.mouse.move(cx + 50, cy, steps=8)
+    page.mouse.up()
+    assert temp.input_value() == "1.5", f"drag right: {temp.input_value()!r}"
+
+    # drag far left → clamped at min 0
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    page.mouse.move(cx - 400, cy, steps=8)
+    page.mouse.up()
+    assert temp.input_value() == "0", f"drag-left clamp: {temp.input_value()!r}"
+
+    # integers stay integers: n at speed 0.05/px, drag right 100px → 1 + 5
+    npt = page.get_by_test_id("param-n")
+    npt.fill("1")
+    npt.dispatch_event("change")
+    nbox = npt.bounding_box()
+    ncx, ncy = nbox["x"] + nbox["width"] / 2, nbox["y"] + nbox["height"] / 2
+    page.mouse.move(ncx, ncy)
+    page.mouse.down()
+    page.mouse.move(ncx + 100, ncy, steps=8)
+    page.mouse.up()
+    assert npt.input_value() == "6", f"n drag: {npt.input_value()!r}"
+
+    # a plain click (no movement past the 4px threshold) still focuses for typing
+    temp.click()
+    expect(temp).to_be_focused()
 
 
 def test_drawer_collapses_and_canvas_stays_interactive(page_as, api, weave):

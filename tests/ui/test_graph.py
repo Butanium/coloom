@@ -342,7 +342,7 @@ def test_drag_pans_and_is_not_a_click(page_as, api, weave):
 
     # a normal click right AFTER a drag must still work (dragDist resets);
     # refit first so every square is back inside the viewport
-    page.get_by_role("button", name="⛶ weave", exact=True).click()
+    page.get_by_role("button", name="fit weave", exact=True).click()
     page.wait_for_timeout(250)
     w = get_weave(api, weave)
     i, target = find_identifiable_square(
@@ -401,7 +401,7 @@ def test_fit_weave_button_fits_content(page_as, weave):
         page.mouse.up()
     assert not squares_inside_container(page), "panning failed to move content off-screen"
 
-    page.get_by_role("button", name="⛶ weave", exact=True).click()
+    page.get_by_role("button", name="fit weave", exact=True).click()
     page.wait_for_timeout(250)
     assert squares_inside_container(page), (
         "fit-weave header button did not bring all squares back into the viewport"

@@ -184,9 +184,14 @@ export function isGeneratorActive(ref: GeneratorRef): boolean {
 }
 
 export function toggleActiveGenerator(ref: GeneratorRef) {
-  activeGenerators.list = isGeneratorActive(ref)
-    ? activeGenerators.list.filter((r) => generatorKey(r) !== generatorKey(ref))
-    : [...activeGenerators.list, ref]
+  const activating = !isGeneratorActive(ref)
+  activeGenerators.list = activating
+    ? [...activeGenerators.list, ref]
+    : activeGenerators.list.filter((r) => generatorKey(r) !== generatorKey(ref))
+  // an active-but-hidden chip would be invisible — activating implies shown
+  if (activating) {
+    hiddenGenerators.keys = hiddenGenerators.keys.filter((k) => k !== generatorKey(ref))
+  }
   persistGenerators()
 }
 

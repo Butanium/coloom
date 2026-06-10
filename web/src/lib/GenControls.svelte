@@ -5,6 +5,7 @@
   // overrides, and the weave button.
   import { paramsSummary } from './ParamsEditor.svelte'
   import SetupsDrawer, { type SetupsPrefill } from './SetupsDrawer.svelte'
+  import { dragnum } from './dragnum'
   import { getSetting, setSetting } from './profile.svelte'
   import {
     activeGenerators,
@@ -75,6 +76,12 @@
     if (maxTokens != null) o.max_tokens = maxTokens
     if (n != null) o.n = n
     session.paramOverrides = o
+  }
+
+  /** drag-seed: the value a drag starts from when no override is set yet */
+  function seedParam(key: string, fallback: number): number {
+    const v = Number(placeholderParam(key))
+    return Number.isFinite(v) && placeholderParam(key) !== '' ? v : fallback
   }
 
   function placeholderParam(key: string): string {
@@ -247,7 +254,7 @@
     </button>
   </div>
   <div class="params">
-    <label>
+    <label title="drag ↔ to adjust, click to type">
       temp
       <input
         type="number"
@@ -256,9 +263,18 @@
         placeholder={placeholderParam('temperature')}
         bind:value={temperature}
         onchange={syncOverrides}
+        use:dragnum={{
+          speed: 0.01,
+          min: 0,
+          decimals: 2,
+          get: () => temperature,
+          set: (v) => ((temperature = v), syncOverrides()),
+          seed: () => seedParam('temperature', 1),
+        }}
+        data-testid="param-temp"
       />
     </label>
-    <label>
+    <label title="drag ↔ to adjust, click to type">
       max_tokens
       <input
         type="number"
@@ -267,9 +283,18 @@
         placeholder={placeholderParam('max_tokens')}
         bind:value={maxTokens}
         onchange={syncOverrides}
+        use:dragnum={{
+          speed: 1,
+          min: 1,
+          decimals: 0,
+          get: () => maxTokens,
+          set: (v) => ((maxTokens = v), syncOverrides()),
+          seed: () => seedParam('max_tokens', 32),
+        }}
+        data-testid="param-max-tokens"
       />
     </label>
-    <label>
+    <label title="drag ↔ to adjust, click to type">
       n
       <input
         type="number"
@@ -278,6 +303,15 @@
         placeholder={placeholderParam('n')}
         bind:value={n}
         onchange={syncOverrides}
+        use:dragnum={{
+          speed: 0.05,
+          min: 1,
+          decimals: 0,
+          get: () => n,
+          set: (v) => ((n = v), syncOverrides()),
+          seed: () => seedParam('n', 1),
+        }}
+        data-testid="param-n"
       />
     </label>
     <button
@@ -443,6 +477,14 @@
     width: 4.6rem;
     font-size: var(--fs-ui);
     padding: 0.2rem 0.4rem;
+  }
+  .params input:global(.dragnum):not(:focus) {
+    cursor: ew-resize;
+  }
+  .params input:global(.dragnum-dragging) {
+    cursor: ew-resize;
+    user-select: none;
+    border-color: var(--accent);
   }
   .gen {
     margin-left: auto;

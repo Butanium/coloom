@@ -78,7 +78,7 @@ def open_tab(page, label: str) -> None:
 
 
 def fit_weave(page) -> None:
-    """Click the '⛶ weave' fit button so culling hides nothing."""
+    """Click the 'fit weave' fit button so culling hides nothing."""
     page.locator("button[title^='fit whole weave']").click()
     page.wait_for_timeout(200)
 
