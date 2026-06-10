@@ -1,7 +1,12 @@
 """Profiles: login gate, profile-scoped roaming settings, switch/delete flows.
 
-Profiles are SERVER-GLOBAL; tests use uniquely-named profiles and delete them
-in finally blocks (page_as profiles like 'uitest-clement' are reset by the fixture).
+Profiles are SERVER-GLOBAL; tests use uniquely-named uitest-* profiles and
+delete them in finally blocks (page_as profiles like 'uitest-clement' are reset
+by the fixture).
+
+Gate URLs carry ?test=true (→ /?test=true#/): uitest-* profiles are hidden
+from the gate without the flag (so Clément's real gate stays clean of test
+fixtures); page_as bypasses the gate entirely and needs no flag.
 """
 
 import os
@@ -11,6 +16,8 @@ from playwright.sync_api import expect
 
 BASE = os.environ.get("COLOOM_UI_BASE", "http://localhost:5174")
 API = os.environ.get("COLOOM_API", "http://localhost:4444")
+
+GATE = f"{BASE}/?test=true#/"  # login gate WITH test profiles shown
 
 
 def _fresh_ctx(browser, init_script=None):
@@ -24,10 +31,10 @@ def _fresh_ctx(browser, init_script=None):
 def test_login_gate_create_profile_and_enter(browser, api, weave):
     """No cached profile → login page; creating one lands on the picker and
     the profile exists server-side."""
-    name = "ui-test-newcomer"
+    name = "uitest-newcomer"
     ctx, page = _fresh_ctx(browser)
     try:
-        page.goto(f"{BASE}/#/", wait_until="networkidle")
+        page.goto(GATE, wait_until="networkidle")
         expect(page.get_by_test_id("new-profile-name")).to_be_visible()
         page.get_by_test_id("new-profile-name").fill(name)
         page.get_by_test_id("new-profile-create").click()
@@ -42,9 +49,32 @@ def test_login_gate_create_profile_and_enter(browser, api, weave):
         httpx.delete(f"{API}/profiles/{name}", timeout=5)
 
 
+def test_gate_hides_uitest_profiles_without_flag(browser, api, weave):
+    """uitest-* profiles are test fixtures: invisible on the plain gate,
+    visible with ?test=true. Non-test profiles show either way."""
+    test_name = "uitest-gate-filteree"
+    real_name = "gate-filter-real-person"
+    httpx.put(f"{API}/profiles/{test_name}", json={"settings": {}}, timeout=5)
+    httpx.put(f"{API}/profiles/{real_name}", json={"settings": {}}, timeout=5)
+    ctx, page = _fresh_ctx(browser)
+    try:
+        # plain gate: the uitest profile is hidden, the real one shows
+        page.goto(f"{BASE}/#/", wait_until="networkidle")
+        expect(page.get_by_test_id(f"profile-{real_name}")).to_be_visible()
+        expect(page.get_by_test_id(f"profile-{test_name}")).to_have_count(0)
+        # ?test=true: both show (different search = a real navigation/reload)
+        page.goto(GATE, wait_until="networkidle")
+        expect(page.get_by_test_id(f"profile-{real_name}")).to_be_visible()
+        expect(page.get_by_test_id(f"profile-{test_name}")).to_be_visible()
+    finally:
+        ctx.close()
+        httpx.delete(f"{API}/profiles/{test_name}", timeout=5)
+        httpx.delete(f"{API}/profiles/{real_name}", timeout=5)
+
+
 def test_cached_profile_skips_gate_and_settings_roam(browser, api, weave):
     """ui prefs saved under the profile roam to a brand-new browser context."""
-    name = "ui-test-roamer"
+    name = "uitest-roamer"
     httpx.put(f"{API}/profiles/{name}", json={"settings": {}}, timeout=5)
     init = (
         f"localStorage.setItem('coloom.profile', {name!r});"
@@ -75,7 +105,7 @@ def test_cached_profile_skips_gate_and_settings_roam(browser, api, weave):
 
 
 def test_switch_profile_returns_to_gate(browser, api, weave):
-    name = "ui-test-switcher"
+    name = "uitest-switcher"
     httpx.put(f"{API}/profiles/{name}", json={"settings": {}}, timeout=5)
     init = f"localStorage.setItem('coloom.profile', {name!r})"
     ctx, page = _fresh_ctx(browser, init)
@@ -92,21 +122,37 @@ def test_switch_profile_returns_to_gate(browser, api, weave):
         httpx.delete(f"{API}/profiles/{name}", timeout=5)
 
 
-def test_delete_profile_from_gate_is_soft(browser, api, weave):
-    """Deleting from the gate hides the profile but keeps its settings on the
-    server (soft delete), and logging in with the same name resurrects it."""
-    name = "ui-test-deletee"
+def test_delete_profile_from_gate_is_soft_and_two_step(browser, api, weave):
+    """Deleting from the gate is an inline two-step (NO native popup): first
+    click arms the button, second click deletes. The delete hides the profile
+    but keeps its settings on the server (soft delete), and logging in with
+    the same name resurrects it."""
+    name = "uitest-deletee"
     httpx.put(
         f"{API}/profiles/{name}", json={"settings": {"precious": True}}, timeout=5
     )
     ctx, page = _fresh_ctx(browser)
     try:
-        page.goto(f"{BASE}/#/", wait_until="networkidle")
+        dialogs = []
+        page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+        page.goto(GATE, wait_until="networkidle")
         row = page.get_by_test_id(f"profile-{name}")
         expect(row).to_be_visible()
-        page.on("dialog", lambda d: d.accept())
-        page.get_by_test_id(f"profile-delete-{name}").click()
+
+        rm = page.get_by_test_id(f"profile-delete-{name}")
+        rm.click()  # first click only ARMS
+        expect(rm).to_have_text("sure?")
+        expect(row).to_be_visible()  # nothing deleted yet
+        # Escape disarms without deleting
+        rm.press("Escape")
+        expect(rm).not_to_have_text("sure?")
+        r = httpx.get(f"{API}/profiles/{name}", timeout=5)
+        assert r.json().get("active", True) is True, "disarm must not delete"
+
+        rm.click()
+        rm.click()  # armed → fires
         expect(page.get_by_test_id(f"profile-{name}")).to_have_count(0)
+        assert dialogs == [], f"native popup fired on profile delete: {dialogs}"
 
         # server-side: hidden from the list, but the settings survive
         r = httpx.get(f"{API}/profiles/{name}", timeout=5)
@@ -130,7 +176,7 @@ def test_delete_profile_from_gate_is_soft(browser, api, weave):
 def test_identity_follows_profile(page_as, api, weave):
     """The profile name IS the identity: a profile with no cursor in the weave
     gets one (named after it) the first time it interacts."""
-    name = "ui-test-fresh-identity"
+    name = "uitest-fresh-identity"
     try:
         page = page_as(name, weave)
         assert name not in api.get(f"/weaves/{weave}").json()["cursors"]

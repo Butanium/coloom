@@ -86,9 +86,20 @@ async def main() -> None:
         wid = created["weave"]["id"]
         print(f"weave {wid} created")
 
+        # generators replaced presets: make one inheriting the builtin
+        # "default" template (imported from the yaml at boot)
+        generator = cli(
+            server, "generators", "create",
+            "--profile", "smoke", "--name", "smoke-gen", "--parent", "template:default",
+        )
+        print(f"generator {generator['id']} created (template:default)")
+
         ws_url = f"ws://127.0.0.1:{port}/ws?weave_id={wid}"
         async with connect(ws_url) as ws:
-            gen_nodes = cli(server, "--weave", wid, "gen", "-n", "2", "--move-cursor")
+            gen_nodes = cli(
+                server, "--weave", wid, "gen", "-n", "2", "--move-cursor",
+                "--generator", generator["id"],
+            )
             assert len(gen_nodes) == 2
             assert all(n["content"]["type"] == "tokens" for n in gen_nodes)
             tok = gen_nodes[0]["content"]["tokens"][0]

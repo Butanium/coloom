@@ -11,9 +11,11 @@ branching** (click a top-logprob alternative → split + sibling branch), right-
 menu incl. the "summon <cursor> here" gesture, per-node gen-config inspection, presence
 ("X is weaving…") from `gen_started/finished` events, live multi-client WS sync. Built by a
 spec-extraction workflow (`docs/ui-specs/*.md`, exact behaviors from Tapestry-Loom source) +
-6 parallel component agents + 7 adversarial playwright testers. **Tests: 81 fast
-(`uv run pytest`) + 140 browser-interaction (`uv run pytest tests/ui`, opt-in, needs the dev
-stack: `uv run coloom-fake-openai` + `uv run coloom-server` + `cd web && npm run dev`).**
+6 parallel component agents + 7 adversarial playwright testers. **Tests: 124 fast
+(`uv run pytest`) + the browser-interaction suite (`uv run pytest tests/ui`, opt-in,
+self-contained: the conftest builds web/ and launches its own ephemeral
+fake-openai + coloom-server on free ports — no dev stack or restart coordination needed;
+escape hatch: export COLOOM_UI_BASE/COLOOM_API to target the dev stack instead).**
 Automated tests use the **gpt-fake** mock (`src/coloom/fake_openai.py` — random tokens/logprobs,
 free); real gpt4-base stays for fun manual smokes. Seed a dev weave:
 `uv run scripts/seed_dev_weave.py`. Design rationale in [`docs/PLAN.md`](docs/PLAN.md);
@@ -78,6 +80,38 @@ double-append bug was a stale diff baseline (edit 2 diffed against a thread not 
 edit 1): `applyEdit` now waits for the live thread to provably contain the previous edit
 before re-diffing, doc render stays frozen across the whole sync window, with a prefix-match +
 4s timeout escape for concurrent remote edits.
+**Round 5 (2026-06-10 evening, team coloom-gen: lead + backend/frontend/frontend2):** the
+**templates + per-profile generators redesign** (`docs/generators-api.md`, supersedes
+setups-api): one noun — a **template** (server-global shelf definition; builtin = imported
+from yaml, read-only) and a **generator** (per-profile, chip-able, optionally inheriting
+template→generator chains with per-field overrides; nobody can edit YOUR sampling strategy).
+Chips: body-click = **focus** (quick temp/max_tokens/n row + **drag-to-adjust**, à la egui
+DragValue, edit the focused generator, persisted via debounced PATCH; placeholders = inherited
+values, emptying clears to inherit), leading **dot = active** toggle (fan-out unchanged);
+stale-ancestor badge when someone else edits a template you inherit (origin-absorbed, cleared
+on focus). Drawer: single edit form, create from scratch/template/generator × inherit/duplicate,
+promote-to-template, **endpoint probe** (`POST /probe-endpoint`, by-id mode for stored "***"
+keys; reachability indicator + `/models` datalist autocomplete). Server: mutation events with
+`by` (percent-encoded `X-Coloom-Profile`) ride a global scope (`weave_id:""`,
+`docs/events-api.md`); per-profile seeding from builtin templates (never-resurrect). Also:
+(1) **node soft-delete + Ctrl+Z undo** — DELETE marks the subtree (`nodes.deleted` = op-root
+id), `POST .../restore` un-deletes by op with ancestor-chaining, undo stack
+(`web/src/lib/undo.svelte.ts`, rebindable, LIFO, re-parks cursors via `moved_cursors.from`),
+toast with undo button; **node deletes have NO confirmation**; (2) **zero native popups** —
+in-app `askConfirm` dialog + `ArmedButton` inline two-step for weave/profile deletes;
+(3) **activity feed**: click-to-expand entries, no horizontal scroll, **this-weave/all-weaves
+toggle** (refcounted unfiltered `/ws` in `globalevents.svelte.ts`), neutral info-toast variant;
+(4) **refetch race fixed** — a weave snapshot can't clobber events patched while it was in
+flight (latest-fetch-wins + in-flight patch replay in `state.svelte.ts`; third member of the
+optimistic-update bug family); (5) **two-stack split**: Clément's **live instance :5555**
+(systemd user service `coloom-live`, durable `~/coloom-data/coloom.sqlite`, profile `clement`,
+2 templates, daily 04:17 backup cron → `~/coloom-backups/`, serves `web/dist` via
+`--static-dir`) vs the throwaway dev playground :4444/:5174; (6) **hermetic UI tests** —
+conftest builds web/ + launches an ephemeral fake-openai + server on free ports per session
+(proof: 166/166), dev stack no longer involved; (7) `.env` now actually loaded by the server
+(`--env-file`); activating a hidden generator un-hides it. Known deferred: in-editor TEXT undo
+(structural undo shipped), neutral-toast adoption beyond undo notices, `removed` legacy alias
+drop, the round-3/4 deferreds.
 
 ## Layout
 - `src/coloom/models.py` — pydantic weave model (Node, Snippet/Tokens, Creator attribution, Cursor)
@@ -86,8 +120,10 @@ before re-diffing, doc render stays frozen across the whole sync window, with a 
   Also the append-only `events` table (the WS/polling change feed).
 - `src/coloom/inference.py` + `config.py` — httpx `/v1/completions` client with the
   polyparser-derived edge-case handling; YAML endpoints/presets (`coloom.example.yaml`)
-- `src/coloom/setups.py` — two-layer inference setups (ModelSetup/SamplerSetup, param merge,
-  `resolve_sampler()`); stored server-globally in SQLite, REST CRUD under `/setups`
+- `src/coloom/generators.py` — templates + per-profile generators (Template/Generator/ParentRef,
+  leaf→root `resolve_chain()`); contract in `docs/generators-api.md`; templates server-global,
+  generators per-profile, REST CRUD under `/templates` + `/generators` (replaced the two-layer
+  setups — old module in `src/coloom/deprecated/`)
 - `src/coloom/server/` — FastAPI REST + `/ws` EventHub; `uv run coloom-server`
 - `src/coloom/cli.py` — agent-facing CLI (`uv run coloom …`), JSON stdout / logs stderr
 - `src/coloom/fake_openai.py` — **gpt-fake** mock completions server (`uv run coloom-fake-openai`,
@@ -101,14 +137,33 @@ before re-diffing, doc render stays frozen across the whole sync window, with a 
   (stores register `onProfileLogin` appliers + persist via `setSetting`); `keybindings.svelte.ts`
   the rebindable-shortcut table; dev proxy to :4444 (`COLOOM_SERVER` overridable);
   `npm run dev|build|check` from `web/`
-- `tests/ui/` — 90 playwright interaction tests (opt-in; per-test seeded weaves; fixtures in its
-  `conftest.py`)
+- `tests/ui/` — playwright interaction tests (opt-in; HERMETIC: conftest builds web/dist and
+  spawns an ephemeral fake-openai + coloom-server per session on free ports + temp db;
+  per-test seeded weaves; COLOOM_UI_BASE/COLOOM_API env vars re-target the dev stack,
+  COLOOM_TEST_NO_BUILD=1 reuses the existing dist)
+- `docs/events-api.md` — change-feed contract: GET /events + /ws scopes (global activity =
+  omit `weave_id`), node soft-delete/restore semantics (undo)
 - `docs/tapestry-viewer-audit.md` — full Tapestry-Loom viewer feature audit (core/later/skip),
   the conscious feature baseline for the web UI
 - `docs/ui-specs/` — exact behavioral specs extracted from Tapestry-Loom source (canvas, textedit,
   lists, shell/menus/graph, shared-state); the reference for UI behavior questions
 - `tests/fixtures/gpt4base_completion.json` — captured real response driving parser + server tests
   (fun fact: gpt4-base self-reports as `gpt-4-0314`)
+
+## Running instances (two stacks — don't mix them up)
+- **LIVE** (durable, Clément's real weaves): systemd user service `coloom-live` on **:5555**,
+  db `~/coloom-data/coloom.sqlite`, config `~/coloom-data/coloom.yaml` (exactly 2 builtin
+  templates: `gpt4-base` + `gpt-fake`), profile `clement` (no accent). Serves the built
+  `web/dist/` UI directly — after a UI change lands, `cd web && npm run build` then
+  `systemctl --user restart coloom-live`. **Daily backups**: cron 04:17 →
+  `scripts/backup_coloom_live.sh` → `~/coloom-backups/` (sqlite `.backup`, keeps newest 14).
+  Manage: `systemctl --user status|restart coloom-live`; logs: `journalctl --user -u coloom-live`.
+  NEVER point tests at :5555.
+- **DEV playground** (debris, for interactive dev/smokes): hand-launched `coloom-server` on
+  **:4444** with `--db /tmp/coloom-ui-smoke.sqlite` + repo `coloom.yaml`, vite dev server on
+  :5173/:5174 proxying to it. UI tests DON'T need it anymore (hermetic ephemeral stack — see
+  `tests/ui/` above), but can be pointed at it via COLOOM_UI_BASE/COLOOM_API for fast
+  iteration; if someone is doing that, coordinate restarts as before.
 
 ## Stack
 - **Backend** (`core` + `server`): Python, `uv`, FastAPI (REST) + WebSocket for change events.
@@ -119,7 +174,8 @@ before re-diffing, doc render stays frozen across the whole sync window, with a 
   `llama-server` and vLLM also first-class targets.
 - **CLI** (`coloom`): Python, agent-facing — JSON in/out, non-interactive, an HTTP client to the server.
 - **Web frontend**: TypeScript SPA — **Vite + Svelte, in-repo under `web/`** (no SvelteKit) — on
-  the server's REST + WS; FastAPI serves the built `web/dist/`.
+  the server's REST + WS; FastAPI serves the built `web/dist/` (`--static-dir`, default
+  `web/dist`, mounted last so API routes win).
 - No Rust, no `.tapestry` interop. Our own weave format, *inspired by* Tapestry Loom's v1 design.
 
 ## Weave model (sketch)

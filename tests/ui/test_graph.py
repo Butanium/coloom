@@ -417,10 +417,15 @@ def test_live_update_new_squares_without_reload(page_as, api, weave):
     assert n0_dom == len(w["nodes"])
 
     root_id = next(nid for nid, n in w["nodes"].items() if not n["parents"])
+    gen_id = next(  # /gen takes generator_id now (docs/generators-api.md)
+        g["id"]
+        for g in api.get("/generators?profile=uitest-clement").json()
+        if g["name"] == "default"
+    )
     resp = api.post(
         f"/weaves/{weave}/gen",
-        json={"node_id": root_id, "cursor": "uitest-claude", "preset": "default",
-              "params": {"n": 2}},
+        json={"node_id": root_id, "cursor": "uitest-claude",
+              "generator_id": gen_id, "params": {"n": 2}},
     )
     resp.raise_for_status()
     new_nodes = resp.json()

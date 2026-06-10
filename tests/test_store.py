@@ -8,7 +8,7 @@ from coloom.models import (
     Token,
     Tokens,
 )
-from coloom.store import NotFound, WeaveStore, WeaveStoreError
+from coloom.store import Conflict, NotFound, WeaveStore, WeaveStoreError
 
 
 @pytest.fixture
@@ -130,8 +130,10 @@ def test_remove_node_cascades_and_relocates_cursors(store):
     leaf = store.add_node(w.id, Snippet(text="c"), parent_id=mid.id)
     store.set_cursor(w.id, "clem", leaf.id)
 
-    removed = store.remove_node(w.id, mid.id)
+    removed, moved = store.remove_node(w.id, mid.id)
     assert set(removed) == {mid.id, leaf.id}
+    assert removed[0] == mid.id  # deletion root first
+    assert moved == [{"name": "clem", "from": leaf.id, "to": root.id}]
     weave = store.get_weave(w.id)
     assert set(weave.nodes) == {root.id}
     # cursor relocated to the removed subtree's parent
@@ -139,8 +141,9 @@ def test_remove_node_cascades_and_relocates_cursors(store):
     assert weave.nodes[root.id].children == []
 
     # removing a root deletes cursors pointing into its subtree
-    removed = store.remove_node(w.id, root.id)
+    removed, moved = store.remove_node(w.id, root.id)
     assert set(removed) == {root.id}
+    assert moved == [{"name": "clem", "from": root.id, "to": None}]
     assert store.list_cursors(w.id) == {}
 
 
@@ -307,3 +310,120 @@ def test_event_origin_stamping(store):
     assert by_type["cursor_moved"][0]["payload"]["origin"] == "tab-abc123"
     # the later set_cursor ran outside the scope
     assert "origin" not in by_type["cursor_moved"][1]["payload"]
+
+
+# ------------------------------------------------------- soft-delete / restore
+
+
+def test_soft_delete_restore_roundtrip(store):
+    w = store.create_weave()
+    root = store.add_node(w.id, Snippet(text="r"))
+    mid = store.add_node(w.id, Snippet(text="m"), parent_id=root.id)
+    leaf = store.add_node(w.id, Snippet(text="l"), parent_id=mid.id)
+    sib = store.add_node(w.id, Snippet(text="s"), parent_id=root.id)
+    store.set_bookmarked(w.id, leaf.id, True)
+
+    removed, _ = store.remove_node(w.id, mid.id)
+    assert set(removed) == {mid.id, leaf.id}
+    weave = store.get_weave(w.id)
+    assert set(weave.nodes) == {root.id, sib.id}
+    assert weave.nodes[root.id].children == [sib.id]
+    assert weave.bookmarks == []  # deleted bookmark hidden
+    with pytest.raises(NotFound):
+        store.get_node(w.id, mid.id)
+
+    restored = store.restore_node(w.id, mid.id)
+    assert set(restored) == {mid.id, leaf.id}
+    weave = store.get_weave(w.id)
+    assert set(weave.nodes) == {root.id, mid.id, leaf.id, sib.id}
+    # edge order survives the delete/restore cycle (edges were never removed)
+    assert weave.nodes[root.id].children == [mid.id, sib.id]
+    assert weave.nodes[mid.id].children == [leaf.id]
+    assert weave.bookmarks == [leaf.id]
+    assert store.get_thread_content(w.id, leaf.id) == "rml"
+    # events logged
+    types = [e["type"] for e in store.get_events(w.id)]
+    assert "node_removed" in types and "node_restored" in types
+
+
+def test_restore_errors(store):
+    w = store.create_weave()
+    root = store.add_node(w.id, Snippet(text="r"))
+    with pytest.raises(Conflict):
+        store.restore_node(w.id, root.id)  # not deleted
+    with pytest.raises(NotFound):
+        store.restore_node(w.id, "nonexistent")
+    store.remove_node(w.id, root.id)
+    with pytest.raises(NotFound):
+        store.remove_node(w.id, root.id)  # already deleted → invisible
+
+
+def test_deleted_subtree_is_inert(store):
+    w = store.create_weave()
+    root = store.add_node(w.id, Snippet(text="r"))
+    child = store.add_node(w.id, Snippet(text="c"), parent_id=root.id)
+    store.remove_node(w.id, child.id)
+    with pytest.raises(NotFound):
+        store.add_node(w.id, Snippet(text="x"), parent_id=child.id)
+    with pytest.raises(NotFound):
+        store.set_cursor(w.id, "clem", child.id)
+    with pytest.raises(NotFound):
+        store.set_bookmarked(w.id, child.id, True)
+
+
+def test_nested_delete_undo_layering(store):
+    # delete B (inside A's subtree), then delete A: restoring A must NOT
+    # resurrect B (it was deleted by a separate, earlier op)
+    w = store.create_weave()
+    root = store.add_node(w.id, Snippet(text="r"))
+    a = store.add_node(w.id, Snippet(text="a"), parent_id=root.id)
+    b = store.add_node(w.id, Snippet(text="b"), parent_id=a.id)
+    b_leaf = store.add_node(w.id, Snippet(text="bl"), parent_id=b.id)
+
+    removed_b, _ = store.remove_node(w.id, b.id)
+    assert set(removed_b) == {b.id, b_leaf.id}
+    removed_a, _ = store.remove_node(w.id, a.id)
+    assert set(removed_a) == {a.id}  # stops at the already-deleted boundary
+
+    restored = store.restore_node(w.id, a.id)
+    assert set(restored) == {a.id}
+    weave = store.get_weave(w.id)
+    assert set(weave.nodes) == {root.id, a.id}
+    assert weave.nodes[a.id].children == []  # B still deleted
+
+    # restoring B while reachable brings only B's op back
+    restored = store.restore_node(w.id, b.id)
+    assert set(restored) == {b.id, b_leaf.id}
+    assert set(store.get_weave(w.id).nodes) == {root.id, a.id, b.id, b_leaf.id}
+
+
+def test_restore_deep_node_restores_ancestor_ops(store):
+    # delete B, then delete A (B's ancestor): restoring B's leaf must undo
+    # BOTH ops so the leaf is actually reachable (no orphan islands)
+    w = store.create_weave()
+    root = store.add_node(w.id, Snippet(text="r"))
+    a = store.add_node(w.id, Snippet(text="a"), parent_id=root.id)
+    b = store.add_node(w.id, Snippet(text="b"), parent_id=a.id)
+    b_leaf = store.add_node(w.id, Snippet(text="bl"), parent_id=b.id)
+    store.remove_node(w.id, b.id)
+    store.remove_node(w.id, a.id)
+
+    restored = store.restore_node(w.id, b_leaf.id)
+    assert set(restored) == {a.id, b.id, b_leaf.id}
+    assert store.get_thread_content(w.id, b_leaf.id) == "rabbl"
+
+
+def test_soft_delete_persists_across_reopen(tmp_path):
+    db = tmp_path / "persist.sqlite"
+    s = WeaveStore(db)
+    w = s.create_weave()
+    root = s.add_node(w.id, Snippet(text="r"))
+    child = s.add_node(w.id, Snippet(text="c"), parent_id=root.id)
+    s.remove_node(w.id, child.id)
+    s.close()
+
+    s = WeaveStore(db)
+    assert set(s.get_weave(w.id).nodes) == {root.id}
+    assert set(s.restore_node(w.id, child.id)) == {child.id}
+    assert set(s.get_weave(w.id).nodes) == {root.id, child.id}
+    s.close()

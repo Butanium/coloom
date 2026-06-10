@@ -28,6 +28,12 @@ async def collect_events(
 
 def test_two_clients_see_each_other_live(capsys, live_server):
     created = cli(capsys, live_server, "new", "--title", "live", "--text", "Seed text")
+    # the generator is created before B subscribes: its (global) creation event
+    # must not show up in B's expected stream below
+    generator = cli(
+        capsys, live_server, "generators", "create",
+        "--profile", "live-tester", "--name", "g", "--parent", "template:fake",
+    )
     wid = created["weave"]["id"]
     root_id = created["root"]["id"]
     ws_url = live_server.replace("http://", "ws://") + f"/ws?weave_id={wid}"
@@ -56,7 +62,9 @@ def test_two_clients_see_each_other_live(capsys, live_server):
         " grows",
         "--move-cursor",
     )
-    generated = cli(capsys, live_server, "--weave", wid, "gen")
+    generated = cli(
+        capsys, live_server, "--weave", wid, "gen", "--generator", generator["id"]
+    )
 
     thread.join(timeout=20)
     assert not thread.is_alive(), "subscriber did not receive all events in time"

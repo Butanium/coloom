@@ -21,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import quote
 
 import httpx
 
@@ -54,8 +55,11 @@ def out(data: Any) -> None:
 
 
 class Client:
-    def __init__(self, server: str):
-        self.http = httpx.Client(base_url=server, timeout=300.0)
+    def __init__(self, server: str, profile: str | None = None):
+        # X-Coloom-Profile attributes mutations (events' `by`) to the profile;
+        # percent-encoded: header values can't carry non-ASCII ("clément") raw
+        headers = {"X-Coloom-Profile": quote(profile)} if profile else {}
+        self.http = httpx.Client(base_url=server, timeout=300.0, headers=headers)
 
     def request(self, method: str, path: str, **kwargs) -> Any:
         try:
@@ -156,19 +160,45 @@ def cmd_cursor(client: Client, args: argparse.Namespace) -> None:
         out({"removed": name})
 
 
+def resolve_generator_ref(
+    client: Client, ref: str | None, profile: str | None
+) -> str:
+    """Turn --generator (an id or a name within the profile) into a generator id.
+    Omitted: usable only when the profile has exactly one generator."""
+    gens = (
+        client.request("GET", "/generators", params={"profile": profile})
+        if profile
+        else []
+    )
+    if ref is None:
+        if profile is None:
+            fail(
+                "pass --generator (an id), or `coloom profile login <name>`"
+                " to resolve generators by name"
+            )
+        if len(gens) == 1:
+            return gens[0]["id"]
+        names = ", ".join(sorted(g["name"] for g in gens)) or "none"
+        fail(
+            "pass --generator (id or name); available for"
+            f" profile {profile!r}: {names}"
+        )
+    if any(g["id"] == ref for g in gens):
+        return ref
+    named = [g for g in gens if g["name"] == ref]
+    if len(named) == 1:
+        return named[0]["id"]
+    if len(named) > 1:
+        fail(f"generator name {ref!r} is ambiguous; use an id")
+    return ref  # not in the profile's list: assume it's an id
+
+
 def cmd_gen(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
-    params: dict[str, Any] = {}
-    for kv in args.param:
-        if "=" not in kv:
-            fail(f"--param expects key=value, got {kv!r}")
-        key, value = kv.split("=", 1)
-        try:
-            params[key] = json.loads(value)
-        except json.JSONDecodeError:
-            params[key] = value
+    params = _parse_params(args.param)
     if args.n is not None:
         params["n"] = args.n
+    generator_id = resolve_generator_ref(client, args.generator, logged_in_profile())
     out(
         client.request(
             "POST",
@@ -176,8 +206,7 @@ def cmd_gen(client: Client, args: argparse.Namespace) -> None:
             json={
                 "node_id": args.node,
                 "cursor": args.cursor,
-                "sampler_id": args.sampler,
-                "preset": args.preset,
+                "generator_id": generator_id,
                 "params": params,
                 "move_cursor": args.move_cursor,
             },
@@ -208,6 +237,11 @@ def cmd_rm(client: Client, args: argparse.Namespace) -> None:
     out(client.request("DELETE", f"/weaves/{wid}/nodes/{args.node_id}"))
 
 
+def cmd_restore(client: Client, args: argparse.Namespace) -> None:
+    wid = require_weave(args)
+    out(client.request("POST", f"/weaves/{wid}/nodes/{args.node_id}/restore"))
+
+
 def cmd_split(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
     out(
@@ -230,10 +264,10 @@ def _parse_params(pairs: list[str]) -> dict[str, Any]:
     return params
 
 
-def cmd_setups(client: Client, args: argparse.Namespace) -> None:
-    if args.setups_command == "list":
-        out(client.request("GET", "/setups"))
-    elif args.setups_command == "model":
+def cmd_templates(client: Client, args: argparse.Namespace) -> None:
+    if args.templates_command == "list":
+        out(client.request("GET", "/templates"))
+    elif args.templates_command == "create":
         body: dict[str, Any] = {
             "name": args.name,
             "base_url": args.base_url,
@@ -244,24 +278,58 @@ def cmd_setups(client: Client, args: argparse.Namespace) -> None:
             body["api_key"] = args.api_key
         if args.api_key_env is not None:
             body["api_key_env"] = args.api_key_env
-        out(client.request("POST", "/setups/models", json=body))
-    elif args.setups_command == "sampler":
-        out(
-            client.request(
-                "POST",
-                "/setups/samplers",
-                json={
-                    "name": args.name,
-                    "model_setup_id": args.model_setup_id,
-                    "params": _parse_params(args.param),
-                },
-            )
-        )
-    elif args.setups_command == "rm-model":
-        client.request("DELETE", f"/setups/models/{args.id}")
+        out(client.request("POST", "/templates", json=body))
+    elif args.templates_command == "promote":
+        body = {"from_generator": args.generator_id}
+        if args.name is not None:
+            body["name"] = args.name
+        out(client.request("POST", "/templates", json=body))
+    else:  # rm
+        client.request("DELETE", f"/templates/{args.id}")
         out({"removed": args.id})
-    else:  # rm-sampler
-        client.request("DELETE", f"/setups/samplers/{args.id}")
+
+
+def _generator_field_body(args: argparse.Namespace) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if args.param:
+        body["params"] = _parse_params(args.param)
+    for field in ("base_url", "model", "api_key", "api_key_env"):
+        value = getattr(args, field)
+        if value is not None:
+            # the literal "null" clears a field back to inherited (PATCH) /
+            # leaves it inherited (POST)
+            body[field] = None if value == "null" else value
+    return body
+
+
+def cmd_generators(client: Client, args: argparse.Namespace) -> None:
+    profile = args.profile or logged_in_profile()
+    if args.generators_command == "list":
+        if not profile:
+            fail("pass --profile or `coloom profile login <name>`")
+        out(client.request("GET", "/generators", params={"profile": profile}))
+    elif args.generators_command == "create":
+        if not profile:
+            fail("pass --profile or `coloom profile login <name>`")
+        body = {"profile": profile, "name": args.name, **_generator_field_body(args)}
+        if args.parent is not None:
+            kind, _, ref = args.parent.partition(":")
+            if kind not in ("template", "generator") or not ref:
+                fail("--parent expects template:<id-or-name> or generator:<id>")
+            if kind == "template":
+                templates = client.request("GET", "/templates")
+                named = [t for t in templates if t["name"] == ref]
+                if len(named) == 1 and not any(t["id"] == ref for t in templates):
+                    ref = named[0]["id"]
+            body["parent"] = {"kind": kind, "id": ref}
+        out(client.request("POST", "/generators", json=body))
+    elif args.generators_command == "update":
+        body = _generator_field_body(args)
+        if args.name is not None:
+            body["name"] = args.name
+        out(client.request("PATCH", f"/generators/{args.id}", json=body))
+    else:  # rm
+        client.request("DELETE", f"/generators/{args.id}")
         out({"removed": args.id})
 
 
@@ -355,8 +423,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("gen", help="generate branches from a node via the base model")
     p.add_argument("--node", help="parent node id (default: your cursor)")
-    p.add_argument("--preset", help="named preset from the server config")
-    p.add_argument("--sampler", help="sampler setup id (beats --preset)")
+    p.add_argument(
+        "--generator",
+        help="generator id, or name within your profile (default: the profile's"
+        " only generator, if unique)",
+    )
     p.add_argument("-n", type=int, help="number of completions")
     p.add_argument(
         "--move-cursor",
@@ -381,34 +452,71 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remove", action="store_true")
     p.set_defaults(func=cmd_bookmark)
 
-    p = sub.add_parser("rm", help="remove a node and its subtree")
+    p = sub.add_parser("rm", help="soft-delete a node and its subtree (restorable)")
     p.add_argument("node_id")
     p.set_defaults(func=cmd_rm)
+
+    p = sub.add_parser("restore", help="restore a soft-deleted node + its subtree")
+    p.add_argument("node_id")
+    p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("split", help="split a node (token index / char offset)")
     p.add_argument("node_id")
     p.add_argument("--at", type=int, required=True)
     p.set_defaults(func=cmd_split)
 
-    p = sub.add_parser("setups", help="manage model + sampler setups (server-global)")
-    setups_sub = p.add_subparsers(dest="setups_command", required=True)
-    setups_sub.add_parser("list", help="list all model + sampler setups")
-    sp = setups_sub.add_parser("model", help="create a model setup")
+    p = sub.add_parser("templates", help="manage templates (server-global shelf)")
+    templates_sub = p.add_subparsers(dest="templates_command", required=True)
+    templates_sub.add_parser("list", help="list all templates (builtin + promoted)")
+    sp = templates_sub.add_parser("create", help="create a template")
     sp.add_argument("--name", required=True)
     sp.add_argument("--base-url", required=True)
     sp.add_argument("--model", required=True)
     sp.add_argument("--api-key", help="literal bearer key (redacted in responses)")
     sp.add_argument("--api-key-env", help="env var holding the key (mutually excl.)")
     sp.add_argument("--param", action="append", default=[], metavar="K=V")
-    sp = setups_sub.add_parser("sampler", help="create a sampler setup")
-    sp.add_argument("--name", required=True)
-    sp.add_argument("--model-setup-id", required=True)
-    sp.add_argument("--param", action="append", default=[], metavar="K=V")
-    sp = setups_sub.add_parser("rm-model", help="delete a model setup")
+    sp = templates_sub.add_parser(
+        "promote", help="promote a generator's resolved fields into a template"
+    )
+    sp.add_argument("generator_id")
+    sp.add_argument("--name", help="template name (default: the generator's)")
+    sp = templates_sub.add_parser("rm", help="delete a template (403 on builtins)")
     sp.add_argument("id")
-    sp = setups_sub.add_parser("rm-sampler", help="delete a sampler setup")
-    sp.add_argument("id")
-    p.set_defaults(func=cmd_setups)
+    p.set_defaults(func=cmd_templates)
+
+    p = sub.add_parser("generators", help="manage your per-profile generators")
+    generators_sub = p.add_subparsers(dest="generators_command", required=True)
+    gp = generators_sub.add_parser("list", help="list a profile's generators")
+    gp.add_argument("--profile", help="default: the logged-in profile")
+    gp = generators_sub.add_parser("create", help="create a generator")
+    gp.add_argument("--name", required=True)
+    gp.add_argument("--profile", help="default: the logged-in profile")
+    gp.add_argument(
+        "--parent",
+        metavar="KIND:REF",
+        help="template:<id-or-name> or generator:<id> to inherit from",
+    )
+    gp.add_argument("--base-url")
+    gp.add_argument("--model")
+    gp.add_argument("--api-key")
+    gp.add_argument("--api-key-env")
+    gp.add_argument("--param", action="append", default=[], metavar="K=V")
+    gp = generators_sub.add_parser(
+        "update", help="patch a generator (field 'null' / param K=null clears"
+        " an override back to inherited)"
+    )
+    gp.add_argument("id")
+    gp.add_argument("--name")
+    gp.add_argument("--profile", help=argparse.SUPPRESS)  # unused; profile immutable
+    gp.add_argument("--base-url")
+    gp.add_argument("--model")
+    gp.add_argument("--api-key")
+    gp.add_argument("--api-key-env")
+    gp.add_argument("--param", action="append", default=[], metavar="K=V")
+    gp = generators_sub.add_parser("rm", help="delete a generator (children flatten)")
+    gp.add_argument("id")
+    gp.add_argument("--profile", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_generators)
 
     p = sub.add_parser(
         "profile", help="login as a profile (--cursor and --as default to it)"
@@ -434,7 +542,7 @@ def main(argv: list[str] | None = None) -> None:
         args.cursor = os.environ.get("COLOOM_CURSOR") or profile or "default"
     if getattr(args, "as_label", "absent") is None:
         args.as_label = profile or "human"
-    client = Client(args.server)
+    client = Client(args.server, profile=profile)
     args.func(client, args)
 
 

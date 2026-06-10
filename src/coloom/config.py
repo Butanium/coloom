@@ -12,11 +12,24 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 
 class ConfigError(Exception):
     pass
+
+
+def load_env_file(path: str | Path = ".env") -> bool:
+    """Load a repo-local .env into the process environment (api_key_env
+    endpoints like gpt4-base resolve from it at request time). Existing
+    environment variables always win (override=False). Returns whether the
+    file existed."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    load_dotenv(path, override=False)
+    return True
 
 
 DEFAULT_PARAMS: dict[str, Any] = {

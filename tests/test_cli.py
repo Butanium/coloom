@@ -12,6 +12,15 @@ def run(capsys, live_server, *argv) -> dict | list:
     return json.loads(captured.out)
 
 
+def make_cli_generator(capsys, live_server, profile="cli-tester"):
+    """A generator inheriting from the 'fake' builtin template (imported from
+    the live server's config at boot), created through the CLI itself."""
+    return run(
+        capsys, live_server, "generators", "create",
+        "--profile", profile, "--name", "fakegen", "--parent", "template:fake",
+    )
+
+
 def test_full_cli_coweave_loop(capsys, live_server):
     # human creates a weave with a root
     created = run(
@@ -43,7 +52,11 @@ def test_full_cli_coweave_loop(capsys, live_server):
     assert capsys.readouterr().out == "The loom hummed"
 
     # agent generates branches from its cursor
-    nodes = run(capsys, live_server, "--weave", wid, "gen", "--move-cursor")
+    gen = make_cli_generator(capsys, live_server)
+    nodes = run(
+        capsys, live_server, "--weave", wid,
+        "gen", "--move-cursor", "--generator", gen["id"],
+    )
     assert len(nodes) == 2
     assert all(n["parents"] == [root_id] for n in nodes)
     assert nodes[0]["content"]["type"] == "tokens"
@@ -114,6 +127,15 @@ def test_cli_bookmark_split_rm(capsys, live_server):
 
     removed = run(capsys, live_server, "--weave", wid, "rm", split["tail"]["id"])
     assert removed["removed"] == [split["tail"]["id"]]
+    assert removed["deleted_node_ids"] == [split["tail"]["id"]]
+
+    # rm is a SOFT delete: restore brings the subtree back
+    restored = run(
+        capsys, live_server, "--weave", wid, "restore", split["tail"]["id"]
+    )
+    assert restored["restored_node_ids"] == [split["tail"]["id"]]
+    tree = run(capsys, live_server, "--weave", wid, "read", "--tree")
+    assert split["tail"]["id"] in tree["nodes"]
 
 
 def test_cli_stdin_add(capsys, live_server, monkeypatch):
@@ -128,6 +150,7 @@ def test_cli_stdin_add(capsys, live_server, monkeypatch):
 
 def test_cli_gen_param_override(capsys, live_server, fake_openai_url):
     _, fake_app = fake_openai_url
+    gen = make_cli_generator(capsys, live_server)
     created = run(capsys, live_server, "new", "--text", "p")
     wid = created["weave"]["id"]
     run(
@@ -136,6 +159,8 @@ def test_cli_gen_param_override(capsys, live_server, fake_openai_url):
         "--weave",
         wid,
         "gen",
+        "--generator",
+        gen["id"],
         "-n",
         "2",
         "--param",
@@ -149,36 +174,55 @@ def test_cli_gen_param_override(capsys, live_server, fake_openai_url):
     assert sent["stop"] == ["\n"]
 
 
-def test_cli_setups_flow(capsys, live_server, fake_openai_url):
+def test_cli_templates_and_generators_flow(capsys, live_server, fake_openai_url):
     url, fake_app = fake_openai_url
-    model = run(
-        capsys, live_server, "setups", "model",
+    template = run(
+        capsys, live_server, "templates", "create",
         "--name", "base", "--base-url", url, "--model", "gpt-4-base",
         "--api-key", "sk-secret", "--param", "temperature=0.8",
     )
-    assert model["api_key"] == "***"  # redacted in the CLI response too
-    sampler = run(
-        capsys, live_server, "setups", "sampler",
-        "--name", "wild", "--model-setup-id", model["id"],
+    assert template["api_key"] == "***"  # redacted in the CLI response too
+    gen = run(
+        capsys, live_server, "generators", "create",
+        "--profile", "flow", "--name", "wild",
+        "--parent", "template:base",  # by name
         "--param", "temperature=1.3",
     )
-    listed = run(capsys, live_server, "setups", "list")
-    assert [m["id"] for m in listed["models"]] == [model["id"]]
-    assert [s["id"] for s in listed["samplers"]] == [sampler["id"]]
+    assert gen["parent"] == {"kind": "template", "id": template["id"]}
+    listed = run(capsys, live_server, "generators", "list", "--profile", "flow")
+    assert [g["id"] for g in listed] == [gen["id"]]
+    assert listed[0]["resolved"]["params"]["temperature"] == 1.3
 
-    # gen with --sampler routes through the model setup and sampler overrides
+    # gen with --generator routes through the resolved chain
     created = run(capsys, live_server, "new", "--text", "seed")
     wid = created["weave"]["id"]
     run(
         capsys, live_server, "--weave", wid,
-        "gen", "--node", created["root"]["id"], "--sampler", sampler["id"],
+        "gen", "--node", created["root"]["id"], "--generator", gen["id"],
     )
     assert fake_app.state.received[-1]["temperature"] == 1.3
 
-    # delete order: sampler first (model is referenced -> 409)
-    run(capsys, live_server, "setups", "rm-sampler", sampler["id"])
-    run(capsys, live_server, "setups", "rm-model", model["id"])
-    assert run(capsys, live_server, "setups", "list") == {"models": [], "samplers": []}
+    # update: param K=null removes the override (falls back to the template's)
+    updated = run(
+        capsys, live_server, "generators", "update", gen["id"],
+        "--param", "temperature=null",
+    )
+    assert updated["resolved"]["params"]["temperature"] == 0.8
+
+    # promote the generator into a new template
+    promoted = run(
+        capsys, live_server, "templates", "promote", gen["id"], "--name", "wild-tpl",
+    )
+    assert promoted["params"]["temperature"] == 0.8
+    assert any(
+        t["name"] == "wild-tpl" for t in run(capsys, live_server, "templates", "list")
+    )
+
+    run(capsys, live_server, "generators", "rm", gen["id"])
+    assert run(capsys, live_server, "generators", "list", "--profile", "flow") == []
+    run(capsys, live_server, "templates", "rm", template["id"])
+    names = {t["name"] for t in run(capsys, live_server, "templates", "list")}
+    assert "base" not in names
 
 
 def test_cli_errors_exit_nonzero(capsys, live_server):

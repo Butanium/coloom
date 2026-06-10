@@ -18,7 +18,6 @@ import {
   contextMenu,
   deleteNode,
   generateAt,
-  identity,
   moveMyCursor,
   myCursorNodeId,
   sendViewCommand,
@@ -26,6 +25,7 @@ import {
   toggleActiveGenerator,
   toggleBookmark,
   toggleCollapsed,
+  undoLastAction,
   visibleGenerators,
 } from './state.svelte'
 
@@ -76,19 +76,15 @@ function navigationTarget(dir: 'parent' | 'child' | 'prev' | 'next'): string | n
   return siblings[next]
 }
 
-/** Delete my cursor node (cascades its subtree); cursor → parent FIRST so the
- * server never sees my cursor inside the deleted subtree. */
+/** Delete my cursor node (cascades its subtree). No confirmation — the
+ * deletion toast's "undo" button / Ctrl+Z restore it (undo.svelte.ts). The
+ * SERVER relocates my stranded cursor to the parent and reports it in
+ * moved_cursors, so undo can put it back where it was. */
 async function deleteCursorNode() {
   const weave = session.weave
   if (!weave) return
   const cur = myCursorNodeId()
-  if (!cur) return
-  const node = weave.nodes[cur]
-  if (!node) return
-  const subtree = node.children.length > 0 ? ' and its entire subtree' : ''
-  if (!confirm(`Delete this node${subtree}? (${identity.name}'s cursor moves to the parent)`)) return
-  const parent = node.parents[0]
-  if (parent !== undefined) await moveMyCursor(parent)
+  if (!cur || !weave.nodes[cur]) return
   await deleteNode(cur)
 }
 
@@ -108,11 +104,11 @@ function generate(opts: { moveCursor?: boolean } = {}): boolean {
   return true
 }
 
-/** Toggle the k-th visible generator chip (sampler or preset) on/off. */
+/** Toggle the k-th visible generator chip active/inactive. */
 function toggleGenerator(k: number): boolean {
   const gen = visibleGenerators()[k - 1]
   if (gen === undefined) return false
-  toggleActiveGenerator(gen.ref)
+  toggleActiveGenerator(gen.id)
   return true
 }
 
@@ -140,6 +136,12 @@ const handlers: Record<ActionId, () => boolean> = {
   delete_current: () => {
     void deleteCursorNode()
     return true
+  },
+  undo: () => {
+    // in-editor TEXT undo is deferred: while typing (contenteditable doc, any
+    // input) Ctrl+Z stays with the browser's native text undo, untouched
+    if (isEditableTarget(document.activeElement)) return false
+    return undoLastAction()
   },
   fit_to_cursor: () => {
     sendViewCommand('fit-cursor')

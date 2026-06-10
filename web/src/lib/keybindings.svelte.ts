@@ -23,6 +23,7 @@ export type ActionId =
   | 'toggle_bookmark'
   | 'toggle_collapsed'
   | 'delete_current'
+  | 'undo'
   | 'fit_to_cursor'
   | 'fit_to_weave'
   | 'focus_search'
@@ -44,6 +45,7 @@ export const ACTIONS: Action[] = [
   { id: 'toggle_bookmark', label: 'toggle bookmark', category: 'node' },
   { id: 'toggle_collapsed', label: 'collapse / expand subtree', category: 'node' },
   { id: 'delete_current', label: 'delete node (and subtree)', category: 'node' },
+  { id: 'undo', label: 'undo (restore deleted nodes)', category: 'node' },
   { id: 'fit_to_cursor', label: 'center view on my cursor', category: 'view' },
   { id: 'fit_to_weave', label: 'fit whole weave', category: 'view' },
   { id: 'focus_search', label: 'focus tree search', category: 'view' },
@@ -68,6 +70,7 @@ export const DEFAULT_BINDINGS: Record<ActionId, Binding> = {
   toggle_bookmark: bind('b'),
   toggle_collapsed: bind('c'),
   delete_current: bind('Delete'),
+  undo: bind('z', { ctrl: true }),
   fit_to_cursor: bind('9', { ctrl: true }),
   fit_to_weave: bind('0', { ctrl: true }),
   focus_search: bind('/'),

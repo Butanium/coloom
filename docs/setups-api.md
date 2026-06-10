@@ -1,5 +1,7 @@
 # Setups API contract (model setups + sampler setups)
 
+> **SUPERSEDED 2026-06-10** by [`generators-api.md`](generators-api.md) (templates + per-profile generators). Kept for the migration mapping.
+
 Two-layer, user-composable inference config (replaces "presets are the only way"):
 
 - **Model setup** — an endpoint + model + default params: `{id, name, base_url,

@@ -2,6 +2,7 @@
   import ActivityFeed from './ActivityFeed.svelte'
   import BookmarksPane from './BookmarksPane.svelte'
   import Canvas from './Canvas.svelte'
+  import ConfirmDialog from './ConfirmDialog.svelte'
   import ContextMenu from './ContextMenu.svelte'
   import FlatList from './FlatList.svelte'
   import GenControls from './GenControls.svelte'
@@ -69,7 +70,7 @@
   <h1>{session.weave?.title ?? '…'}</h1>
   <div class="spacer"></div>
   {#if session.inflight > 0 || session.activeGens.length > 0}
-    <span class="inflight" title={session.activeGens.map((g) => `${g.requester ?? '?'} @ ${g.node_id.slice(0, 6)} (${g.preset ?? 'default'})`).join('\n')}>
+    <span class="inflight" title={session.activeGens.map((g) => `${g.requester ?? '?'} @ ${g.node_id.slice(0, 6)} (${g.generator ?? '?'})`).join('\n')}>
       ⟳ {session.activeGens.length || session.inflight} weaving{session.activeGens.length
         ? `: ${[...new Set(session.activeGens.map((g) => g.requester ?? '?'))].join(', ')}`
         : '…'}
@@ -90,6 +91,8 @@
 {#if showKeybindings}
   <KeybindingsDialog onclose={() => (showKeybindings = false)} />
 {/if}
+
+<ConfirmDialog />
 
 {#if session.loadError}
   <div class="center-msg">

@@ -14,6 +14,7 @@ transaction.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -22,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from coloom.generators import Generator, ParentRef, ResolvedGenerator, Template, resolve_chain
 from coloom.models import (
     Creator,
     Cursor,
@@ -34,8 +36,9 @@ from coloom.models import (
     WeaveInfo,
     utcnow,
 )
-from coloom.setups import ModelSetup, SamplerSetup
 from pydantic import TypeAdapter
+
+logger = logging.getLogger("coloom.store")
 
 _CONTENT = TypeAdapter(NodeContent)
 _CREATOR = TypeAdapter(Creator)
@@ -45,6 +48,17 @@ _CREATOR = TypeAdapter(Creator)
 # event's payload as `origin`, so clients can tell their own mutations' echoes
 # from remote changes (None = origin unknown: CLI, tests, old clients).
 current_origin: ContextVar[str | None] = ContextVar("coloom_origin", default=None)
+
+# Request-scoped actor profile (X-Coloom-Profile header): who is performing the
+# mutation. Stamped as `by` into template/generator events so the activity feed
+# can say "clément edited template gpt4-base".
+current_profile: ContextVar[str | None] = ContextVar("coloom_profile", default=None)
+
+# Template/generator events are global, not weave-scoped: they are logged under
+# this sentinel weave_id (weave ids are uuid hex, never empty), broadcast to ALL
+# WS subscribers regardless of their weave filter, and included in weave-filtered
+# `GET /events` queries so activity feeds see them.
+GLOBAL_EVENT_SCOPE = ""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS weaves (
@@ -70,7 +84,11 @@ CREATE TABLE IF NOT EXISTS nodes (
     created    TEXT NOT NULL,
     modified   TEXT NOT NULL,
     bookmarked INTEGER NOT NULL DEFAULT 0,
-    metadata   TEXT NOT NULL DEFAULT '{}'
+    metadata   TEXT NOT NULL DEFAULT '{}',
+    -- soft-delete marker: NULL = live, else the id of the node whose DELETE
+    -- removed this one (the "deletion op" root). Rows + edges stay in the db;
+    -- reads exclude them. Powers POST .../restore (frontend undo).
+    deleted    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_weave ON nodes(weave_id);
 CREATE TABLE IF NOT EXISTS edges (
@@ -112,6 +130,41 @@ CREATE TABLE IF NOT EXISTS profiles (
     updated  TEXT NOT NULL,
     active   INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS templates (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    builtin     INTEGER NOT NULL DEFAULT 0,
+    base_url    TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    api_key     TEXT,
+    api_key_env TEXT,
+    params      TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS generators (
+    id            TEXT PRIMARY KEY,
+    profile       TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    parent_kind   TEXT,
+    parent_id     TEXT,
+    base_url      TEXT,
+    model         TEXT,
+    api_key       TEXT,
+    api_key_env   TEXT,
+    params        TEXT NOT NULL DEFAULT '{}',
+    migrated_from TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_generators_profile ON generators(profile);
+-- (profile, builtin-template) pairs that were seeded once: a deleted seeded
+-- generator must NOT resurrect on the next boot/login re-seed.
+CREATE TABLE IF NOT EXISTS generator_seeds (
+    profile     TEXT NOT NULL,
+    template_id TEXT NOT NULL,
+    PRIMARY KEY (profile, template_id)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Additive column migrations for databases created before the column existed.
@@ -120,6 +173,10 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # (table, column, ALTER statement)
     ("profiles", "active",
      "ALTER TABLE profiles ADD COLUMN active INTEGER NOT NULL DEFAULT 1"),
+    ("generators", "migrated_from",
+     "ALTER TABLE generators ADD COLUMN migrated_from TEXT"),
+    ("nodes", "deleted",
+     "ALTER TABLE nodes ADD COLUMN deleted TEXT"),
 ]
 
 
@@ -132,8 +189,20 @@ class NotFound(WeaveStoreError):
 
 
 class Conflict(WeaveStoreError):
-    """A mutation is blocked by a referential constraint (e.g. deleting a model
-    setup still referenced by a sampler)."""
+    """A mutation is blocked by a referential constraint."""
+
+    pass
+
+
+class BadReference(WeaveStoreError):
+    """A body reference is invalid: unknown parent, cross-profile parent,
+    inheritance cycle. Maps to HTTP 400."""
+
+    pass
+
+
+class Forbidden(WeaveStoreError):
+    """Mutation of a read-only row (builtin template). Maps to HTTP 403."""
 
     pass
 
@@ -160,6 +229,7 @@ class WeaveStore:
                 }
                 if column not in cols:
                     self._conn.execute(alter)
+        self._migrate_setups_to_generators()
 
     def close(self) -> None:
         self._conn.close()
@@ -296,11 +366,18 @@ class WeaveStore:
 
     def _load_nodes(self, weave_id: str) -> list[Node]:
         node_rows = self._conn.execute(
-            "SELECT * FROM nodes WHERE weave_id = ?", (weave_id,)
+            "SELECT * FROM nodes WHERE weave_id = ? AND deleted IS NULL",
+            (weave_id,),
         ).fetchall()
+        # exclude edges touching soft-deleted nodes (a live parent may have a
+        # deleted child at a deletion boundary; the reverse can't happen — a
+        # deleted node's descendants are all deleted)
         edge_rows = self._conn.execute(
-            "SELECT parent_id, child_id FROM edges WHERE weave_id = ?"
-            " ORDER BY parent_id, position",
+            "SELECT e.parent_id, e.child_id FROM edges e"
+            " JOIN nodes pn ON pn.id = e.parent_id"
+            " JOIN nodes cn ON cn.id = e.child_id"
+            " WHERE e.weave_id = ? AND pn.deleted IS NULL AND cn.deleted IS NULL"
+            " ORDER BY e.parent_id, e.position",
             (weave_id,),
         ).fetchall()
         parents: dict[str, list[str]] = {}
@@ -331,16 +408,20 @@ class WeaveStore:
     def get_node(self, weave_id: str, node_id: str) -> Node:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM nodes WHERE id = ? AND weave_id = ?", (node_id, weave_id)
+                "SELECT * FROM nodes WHERE id = ? AND weave_id = ?"
+                " AND deleted IS NULL",
+                (node_id, weave_id),
             ).fetchone()
             if row is None:
                 raise NotFound(f"node {node_id!r} not found in weave {weave_id!r}")
             parent_rows = self._conn.execute(
-                "SELECT parent_id FROM edges WHERE child_id = ? ORDER BY position",
+                "SELECT e.parent_id FROM edges e JOIN nodes n ON n.id = e.parent_id"
+                " WHERE e.child_id = ? AND n.deleted IS NULL ORDER BY e.position",
                 (node_id,),
             ).fetchall()
             child_rows = self._conn.execute(
-                "SELECT child_id FROM edges WHERE parent_id = ? ORDER BY position",
+                "SELECT e.child_id FROM edges e JOIN nodes n ON n.id = e.child_id"
+                " WHERE e.parent_id = ? AND n.deleted IS NULL ORDER BY e.position",
                 (node_id,),
             ).fetchall()
         return self._row_to_node(
@@ -412,12 +493,18 @@ class WeaveStore:
             (weave_id, parent_id, child_id, pos),
         )
 
-    def remove_node(self, weave_id: str, node_id: str) -> list[str]:
-        """Remove a node and its whole subtree. Returns removed node ids.
+    def remove_node(
+        self, weave_id: str, node_id: str
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """SOFT-delete a node and its whole (live) subtree: rows and edges stay
+        in the db, marked with the deletion-op root id; reads exclude them.
+        Restorable via `restore_node` (frontend undo). Returns
+        (deleted node ids, root first; cursor relocations as {name, from, to} —
+        `from` lets a client opt to put cursors back on undo).
         Cursors pointing into the doomed subtree relocate to the removed node's
-        parent (or are deleted if it was a root)."""
+        parent (or are deleted if it was a root → `to: None`)."""
         with self._tx() as c:
-            node = self.get_node(weave_id, node_id)
+            node = self.get_node(weave_id, node_id)  # 404s if already deleted
             doomed = self._collect_subtree(weave_id, node_id)
             stranded = [
                 cur for cur in self.list_cursors(weave_id).values()
@@ -425,12 +512,11 @@ class WeaveStore:
             ]
             qmarks = ",".join("?" * len(doomed))
             c.execute(
-                f"DELETE FROM edges WHERE weave_id = ? AND"
-                f" (parent_id IN ({qmarks}) OR child_id IN ({qmarks}))",
-                (weave_id, *doomed, *doomed),
+                f"UPDATE nodes SET deleted = ? WHERE id IN ({qmarks})",
+                (node_id, *doomed),
             )
-            c.execute(f"DELETE FROM nodes WHERE id IN ({qmarks})", tuple(doomed))
             refuge = node.parents[0] if node.parents else None
+            moved: list[dict[str, Any]] = []
             for cur in stranded:
                 if refuge is None:
                     c.execute(
@@ -442,10 +528,63 @@ class WeaveStore:
                     )
                 else:
                     self._upsert_cursor(c, weave_id, cur.name, refuge, None)
+                moved.append({"name": cur.name, "from": cur.node_id, "to": refuge})
             self._log_event(c, weave_id, "node_removed", {"node_ids": doomed})
-        return doomed
+        return doomed, moved
+
+    def restore_node(self, weave_id: str, node_id: str) -> list[str]:
+        """Un-soft-delete: undoes the deletion op(s) needed to make `node_id`
+        visible again — its own op plus every deleted ancestor's op on the
+        first-parent path to the root (so the restored subtree is reachable,
+        never an orphan island). Nodes deleted by *other* ops nested inside
+        (deleted earlier, separately) stay deleted — undo layering holds.
+        Cursors do NOT move back. Returns the restored node ids."""
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT deleted FROM nodes WHERE id = ? AND weave_id = ?",
+                (node_id, weave_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"node {node_id!r} not found in weave {weave_id!r}")
+            if row["deleted"] is None:
+                raise Conflict(f"node {node_id!r} is not deleted")
+            ops: set[str] = set()
+            current: str | None = node_id
+            seen: set[str] = set()
+            while current is not None and current not in seen:
+                seen.add(current)
+                r = c.execute(
+                    "SELECT deleted FROM nodes WHERE id = ?", (current,)
+                ).fetchone()
+                if r is not None and r["deleted"] is not None:
+                    ops.add(r["deleted"])
+                pr = c.execute(
+                    "SELECT parent_id FROM edges WHERE child_id = ?"
+                    " ORDER BY position LIMIT 1",
+                    (current,),
+                ).fetchone()
+                current = pr["parent_id"] if pr is not None else None
+            qmarks = ",".join("?" * len(ops))
+            restored = [
+                r["id"]
+                for r in c.execute(
+                    f"SELECT id FROM nodes WHERE weave_id = ?"
+                    f" AND deleted IN ({qmarks})",
+                    (weave_id, *ops),
+                ).fetchall()
+            ]
+            assert node_id in restored
+            c.execute(
+                f"UPDATE nodes SET deleted = NULL WHERE weave_id = ?"
+                f" AND deleted IN ({qmarks})",
+                (weave_id, *ops),
+            )
+            self._log_event(c, weave_id, "node_restored", {"node_ids": restored})
+        return restored
 
     def _collect_subtree(self, weave_id: str, node_id: str) -> list[str]:
+        """Live (non-deleted) subtree, depth-first, `node_id` first. Stops at
+        already-soft-deleted children: they belong to an earlier deletion op."""
         out, stack = [], [node_id]
         seen = set()
         while stack:
@@ -455,7 +594,9 @@ class WeaveStore:
             seen.add(nid)
             out.append(nid)
             rows = self._conn.execute(
-                "SELECT child_id FROM edges WHERE parent_id = ?", (nid,)
+                "SELECT e.child_id FROM edges e JOIN nodes n ON n.id = e.child_id"
+                " WHERE e.parent_id = ? AND n.deleted IS NULL",
+                (nid,),
             ).fetchall()
             stack.extend(r["child_id"] for r in rows)
         return out
@@ -669,154 +810,494 @@ class WeaveStore:
             path = self._path_to_root(weave_id, node_id)
             return "".join(self.get_node(weave_id, nid).text for nid in path)
 
-    # ------------------------------------------------------------ setups
+    # ------------------------------------------------------------ templates
 
-    def create_model_setup(self, setup: ModelSetup) -> ModelSetup:
+    def _insert_template(self, c: sqlite3.Connection, t: Template) -> None:
+        c.execute(
+            "INSERT INTO templates (id, name, builtin, base_url, model, api_key,"
+            " api_key_env, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                t.id,
+                t.name,
+                int(t.builtin),
+                t.base_url,
+                t.model,
+                t.api_key,
+                t.api_key_env,
+                json.dumps(t.params),
+            ),
+        )
+
+    @staticmethod
+    def _row_to_template(row: sqlite3.Row) -> Template:
+        return Template(
+            id=row["id"],
+            name=row["name"],
+            builtin=bool(row["builtin"]),
+            base_url=row["base_url"],
+            model=row["model"],
+            api_key=row["api_key"],
+            api_key_env=row["api_key_env"],
+            params=json.loads(row["params"]),
+        )
+
+    def _template_payload(self, t: Template) -> dict[str, Any]:
+        return {"id": t.id, "name": t.name, "by": current_profile.get()}
+
+    def create_template(self, t: Template) -> Template:
         with self._tx() as c:
-            c.execute(
-                "INSERT INTO model_setups (id, name, base_url, api_key, api_key_env,"
-                " model, params) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    setup.id,
-                    setup.name,
-                    setup.base_url,
-                    setup.api_key,
-                    setup.api_key_env,
-                    setup.model,
-                    json.dumps(setup.params),
-                ),
+            self._insert_template(c, t)
+            self._log_event(
+                c, GLOBAL_EVENT_SCOPE, "template_created", self._template_payload(t)
             )
-        return setup
+        return t
 
-    def get_model_setup(self, setup_id: str) -> ModelSetup:
+    def get_template(self, template_id: str) -> Template:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM model_setups WHERE id = ?", (setup_id,)
+                "SELECT * FROM templates WHERE id = ?", (template_id,)
             ).fetchone()
         if row is None:
-            raise NotFound(f"model setup {setup_id!r} not found")
-        return self._row_to_model_setup(row)
+            raise NotFound(f"template {template_id!r} not found")
+        return self._row_to_template(row)
 
-    def list_model_setups(self) -> list[ModelSetup]:
+    def list_templates(self) -> list[Template]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM model_setups ORDER BY name, id"
+                "SELECT * FROM templates ORDER BY builtin DESC, name, id"
             ).fetchall()
-        return [self._row_to_model_setup(r) for r in rows]
+        return [self._row_to_template(r) for r in rows]
 
-    def update_model_setup(
-        self, setup_id: str, fields: dict[str, Any]
-    ) -> ModelSetup:
-        """Partial update: only keys present in `fields` change. Re-validates the
-        api_key/api_key_env mutual exclusion on the merged result."""
+    @staticmethod
+    def _merge_params(
+        current: dict[str, Any], patch: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """PATCH params semantics: per-key merge, a key set to null removes the
+        override, `params: null` wholesale clears them all."""
+        if patch is None:
+            return {}
+        merged = {**current, **patch}
+        return {k: v for k, v in merged.items() if v is not None}
+
+    def update_template(self, template_id: str, fields: dict[str, Any]) -> Template:
+        """Partial update; only keys present in `fields` change. 403 on builtins."""
         with self._tx() as c:
-            current = self.get_model_setup(setup_id)
+            current = self.get_template(template_id)
+            if current.builtin:
+                raise Forbidden(f"template {current.name!r} is builtin (read-only)")
+            if "params" in fields:
+                fields = {
+                    **fields,
+                    "params": self._merge_params(current.params, fields["params"]),
+                }
             merged = current.model_copy(update=fields)
-            ModelSetup.model_validate(merged.model_dump())  # re-run validators
+            merged = Template.model_validate(merged.model_dump())  # re-run validators
             c.execute(
-                "UPDATE model_setups SET name = ?, base_url = ?, api_key = ?,"
-                " api_key_env = ?, model = ?, params = ? WHERE id = ?",
+                "UPDATE templates SET name = ?, base_url = ?, model = ?, api_key = ?,"
+                " api_key_env = ?, params = ? WHERE id = ?",
                 (
                     merged.name,
                     merged.base_url,
+                    merged.model,
                     merged.api_key,
                     merged.api_key_env,
-                    merged.model,
                     json.dumps(merged.params),
-                    setup_id,
+                    template_id,
                 ),
+            )
+            self._log_event(
+                c, GLOBAL_EVENT_SCOPE, "template_updated", self._template_payload(merged)
             )
         return merged
 
-    def delete_model_setup(self, setup_id: str) -> None:
+    def delete_template(self, template_id: str) -> None:
+        """403 on builtins. Generators inheriting from this template are
+        FLATTENED first (their resolved fields materialized, parent detached) —
+        deleting a parent never changes what a child generates."""
         with self._tx() as c:
-            self.get_model_setup(setup_id)
-            (refs,) = c.execute(
-                "SELECT COUNT(*) FROM sampler_setups WHERE model_setup_id = ?",
-                (setup_id,),
+            t = self.get_template(template_id)
+            if t.builtin:
+                raise Forbidden(f"template {t.name!r} is builtin (read-only)")
+            self._flatten_children(c, "template", template_id)
+            c.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+            self._log_event(
+                c, GLOBAL_EVENT_SCOPE, "template_deleted", self._template_payload(t)
+            )
+
+    def upsert_builtin_template(
+        self,
+        name: str,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        api_key_env: str | None,
+        params: dict[str, Any],
+    ) -> Template:
+        """Boot-time import of a yaml preset as a builtin template (upsert by
+        name, id stable across boots). Silent: boot config sync is not a user
+        mutation, no events are logged."""
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT * FROM templates WHERE builtin = 1 AND name = ?", (name,)
             ).fetchone()
-            if refs:
-                raise Conflict(
-                    f"model setup {setup_id!r} is referenced by {refs} sampler(s)"
+            fields = dict(
+                name=name,
+                builtin=True,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                api_key_env=api_key_env,
+                params=params,
+            )
+            if row is None:
+                t = Template(**fields)
+                self._insert_template(c, t)
+            else:
+                t = Template(id=row["id"], **fields)
+                c.execute(
+                    "UPDATE templates SET base_url = ?, model = ?, api_key = ?,"
+                    " api_key_env = ?, params = ? WHERE id = ?",
+                    (base_url, model, api_key, api_key_env, json.dumps(params), t.id),
                 )
-            c.execute("DELETE FROM model_setups WHERE id = ?", (setup_id,))
+        return t
 
-    def create_sampler_setup(self, setup: SamplerSetup) -> SamplerSetup:
-        with self._tx() as c:
-            self.get_model_setup(setup.model_setup_id)  # validate the reference
-            c.execute(
-                "INSERT INTO sampler_setups (id, name, model_setup_id, params)"
-                " VALUES (?, ?, ?, ?)",
-                (
-                    setup.id,
-                    setup.name,
-                    setup.model_setup_id,
-                    json.dumps(setup.params),
-                ),
-            )
-        return setup
+    # ------------------------------------------------------------ generators
 
-    def get_sampler_setup(self, setup_id: str) -> SamplerSetup:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM sampler_setups WHERE id = ?", (setup_id,)
-            ).fetchone()
-        if row is None:
-            raise NotFound(f"sampler setup {setup_id!r} not found")
-        return self._row_to_sampler_setup(row)
-
-    def list_sampler_setups(self) -> list[SamplerSetup]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM sampler_setups ORDER BY name, id"
-            ).fetchall()
-        return [self._row_to_sampler_setup(r) for r in rows]
-
-    def update_sampler_setup(
-        self, setup_id: str, fields: dict[str, Any]
-    ) -> SamplerSetup:
-        with self._tx() as c:
-            current = self.get_sampler_setup(setup_id)
-            merged = current.model_copy(update=fields)
-            if "model_setup_id" in fields:
-                self.get_model_setup(merged.model_setup_id)  # validate the reference
-            c.execute(
-                "UPDATE sampler_setups SET name = ?, model_setup_id = ?, params = ?"
-                " WHERE id = ?",
-                (
-                    merged.name,
-                    merged.model_setup_id,
-                    json.dumps(merged.params),
-                    setup_id,
-                ),
-            )
-        return merged
-
-    def delete_sampler_setup(self, setup_id: str) -> None:
-        with self._tx() as c:
-            self.get_sampler_setup(setup_id)
-            c.execute("DELETE FROM sampler_setups WHERE id = ?", (setup_id,))
+    def _insert_generator(self, c: sqlite3.Connection, g: Generator) -> None:
+        c.execute(
+            "INSERT INTO generators (id, profile, name, parent_kind, parent_id,"
+            " base_url, model, api_key, api_key_env, params, migrated_from)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                g.id,
+                g.profile,
+                g.name,
+                g.parent.kind if g.parent else None,
+                g.parent.id if g.parent else None,
+                g.base_url,
+                g.model,
+                g.api_key,
+                g.api_key_env,
+                json.dumps(g.params),
+                g.migrated_from,
+            ),
+        )
 
     @staticmethod
-    def _row_to_model_setup(row: sqlite3.Row) -> ModelSetup:
-        return ModelSetup(
+    def _row_to_generator(row: sqlite3.Row) -> Generator:
+        parent = None
+        if row["parent_kind"] is not None:
+            parent = ParentRef(kind=row["parent_kind"], id=row["parent_id"])
+        return Generator(
             id=row["id"],
+            profile=row["profile"],
             name=row["name"],
+            parent=parent,
             base_url=row["base_url"],
+            model=row["model"],
             api_key=row["api_key"],
             api_key_env=row["api_key_env"],
-            model=row["model"],
             params=json.loads(row["params"]),
+            migrated_from=row["migrated_from"],
         )
 
-    @staticmethod
-    def _row_to_sampler_setup(row: sqlite3.Row) -> SamplerSetup:
-        return SamplerSetup(
-            id=row["id"],
-            name=row["name"],
-            model_setup_id=row["model_setup_id"],
-            params=json.loads(row["params"]),
+    def _generator_payload(self, g: Generator, **extra: Any) -> dict[str, Any]:
+        return {
+            "id": g.id,
+            "name": g.name,
+            "profile": g.profile,
+            "by": current_profile.get(),
+            **extra,
+        }
+
+    def _validate_parent(self, gen_id: str, profile: str, parent: ParentRef | None) -> None:
+        """Parent must exist; a generator parent must be same-profile; the chain
+        from the parent must never reach `gen_id` (cycle). Raises BadReference."""
+        if parent is None:
+            return
+        if parent.kind == "template":
+            try:
+                self.get_template(parent.id)
+            except NotFound as e:
+                raise BadReference(str(e))
+            return
+        try:
+            p = self.get_generator(parent.id)
+        except NotFound as e:
+            raise BadReference(str(e))
+        if p.profile != profile:
+            raise BadReference(
+                f"parent generator {parent.id!r} belongs to profile {p.profile!r},"
+                f" not {profile!r}"
+            )
+        # cycle check: walk up from the parent; hitting gen_id means a loop
+        seen = set()
+        current: Generator | None = p
+        while current is not None:
+            if current.id == gen_id or current.id in seen:
+                raise BadReference("parent chain would form a cycle")
+            seen.add(current.id)
+            ref = current.parent
+            if ref is None or ref.kind == "template":
+                return
+            current = self.get_generator(ref.id)
+
+    def _generator_chain(self, g: Generator) -> list[Generator | Template]:
+        """Leaf→root chain: the generator, its ancestors, ending at a template
+        (if any). Cycles raise (write-time validation should prevent them)."""
+        chain: list[Generator | Template] = [g]
+        seen = {g.id}
+        ref = g.parent
+        while ref is not None:
+            if ref.kind == "template":
+                chain.append(self.get_template(ref.id))
+                break
+            parent = self.get_generator(ref.id)
+            if parent.id in seen:
+                raise WeaveStoreError(f"generator cycle at {parent.id!r}")
+            seen.add(parent.id)
+            chain.append(parent)
+            ref = parent.parent
+        return chain
+
+    def create_generator(self, g: Generator) -> Generator:
+        with self._tx() as c:
+            self._validate_parent(g.id, g.profile, g.parent)
+            self._insert_generator(c, g)
+            self._log_event(
+                c, GLOBAL_EVENT_SCOPE, "generator_created", self._generator_payload(g)
+            )
+        return g
+
+    def get_generator(self, generator_id: str) -> Generator:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM generators WHERE id = ?", (generator_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"generator {generator_id!r} not found")
+        return self._row_to_generator(row)
+
+    def list_generators(self, profile: str) -> list[Generator]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM generators WHERE profile = ? ORDER BY name, id",
+                (profile,),
+            ).fetchall()
+        return [self._row_to_generator(r) for r in rows]
+
+    def _write_generator(self, c: sqlite3.Connection, g: Generator) -> None:
+        c.execute(
+            "UPDATE generators SET name = ?, parent_kind = ?, parent_id = ?,"
+            " base_url = ?, model = ?, api_key = ?, api_key_env = ?, params = ?"
+            " WHERE id = ?",
+            (
+                g.name,
+                g.parent.kind if g.parent else None,
+                g.parent.id if g.parent else None,
+                g.base_url,
+                g.model,
+                g.api_key,
+                g.api_key_env,
+                json.dumps(g.params),
+                g.id,
+            ),
         )
+
+    def update_generator(self, generator_id: str, fields: dict[str, Any]) -> Generator:
+        """Partial update; explicit null in `fields` clears a scalar back to
+        inherited; params merge per-key (null removes the override)."""
+        with self._tx() as c:
+            current = self.get_generator(generator_id)
+            if "profile" in fields:
+                raise BadReference("a generator's profile is immutable")
+            if "params" in fields:
+                fields = {
+                    **fields,
+                    "params": self._merge_params(current.params, fields["params"]),
+                }
+            if "parent" in fields and fields["parent"] is not None:
+                fields = {**fields, "parent": ParentRef.model_validate(fields["parent"])}
+            merged = current.model_copy(update=fields)
+            merged = Generator.model_validate(merged.model_dump())  # re-run validators
+            if "parent" in fields:
+                self._validate_parent(generator_id, merged.profile, merged.parent)
+            self._write_generator(c, merged)
+            self._log_event(
+                c,
+                GLOBAL_EVENT_SCOPE,
+                "generator_updated",
+                self._generator_payload(merged),
+            )
+        return merged
+
+    def delete_generator(self, generator_id: str) -> None:
+        """Child generators inheriting from this one are FLATTENED first."""
+        with self._tx() as c:
+            g = self.get_generator(generator_id)
+            self._flatten_children(c, "generator", generator_id)
+            c.execute("DELETE FROM generators WHERE id = ?", (generator_id,))
+            self._log_event(
+                c, GLOBAL_EVENT_SCOPE, "generator_deleted", self._generator_payload(g)
+            )
+
+    def _flatten_children(
+        self, c: sqlite3.Connection, parent_kind: str, parent_id: str
+    ) -> None:
+        """Materialize the resolved fields of every direct child generator of a
+        doomed parent, then detach it (parent = null). Same transaction as the
+        delete: behavior is preserved exactly, inheritance is severed."""
+        rows = c.execute(
+            "SELECT * FROM generators WHERE parent_kind = ? AND parent_id = ?",
+            (parent_kind, parent_id),
+        ).fetchall()
+        for row in rows:
+            child = self._row_to_generator(row)
+            resolved = resolve_chain(self._generator_chain(child))
+            flattened = child.model_copy(
+                update={
+                    "parent": None,
+                    "base_url": resolved.base_url,
+                    "model": resolved.model,
+                    "api_key": resolved.api_key,
+                    "api_key_env": resolved.api_key_env,
+                    "params": resolved.params,
+                }
+            )
+            self._write_generator(c, flattened)
+            self._log_event(
+                c,
+                GLOBAL_EVENT_SCOPE,
+                "generator_updated",
+                self._generator_payload(flattened, flattened_from=parent_kind),
+            )
+
+    def resolve_generator(self, generator_id: str) -> ResolvedGenerator:
+        with self._lock:
+            return resolve_chain(self._generator_chain(self.get_generator(generator_id)))
+
+    # ------------------------------------------------------------ seeding
+
+    def _derived_from_template(self, g: Generator, template_id: str) -> bool:
+        return any(
+            isinstance(row, Template) and row.id == template_id
+            for row in self._generator_chain(g)
+        )
+
+    def seed_profile_generators(self, profile: str, log: bool = True) -> list[Generator]:
+        """Give `profile` one inheriting generator per builtin template (name =
+        template name). Idempotent two ways: a (profile, template) pair is never
+        seeded twice (generator_seeds), and a profile that already has a
+        generator derived from the template — even renamed — is left alone.
+        `log=False` for boot-time seeding (no clients connected, keep the feed
+        clean)."""
+        created: list[Generator] = []
+        with self._tx() as c:
+            builtins = [t for t in self.list_templates() if t.builtin]
+            if not builtins:
+                return created
+            seeded = {
+                r["template_id"]
+                for r in c.execute(
+                    "SELECT template_id FROM generator_seeds WHERE profile = ?",
+                    (profile,),
+                ).fetchall()
+            }
+            existing = self.list_generators(profile)
+            for t in builtins:
+                if t.id in seeded:
+                    continue
+                if any(self._derived_from_template(g, t.id) for g in existing):
+                    c.execute(
+                        "INSERT OR IGNORE INTO generator_seeds (profile, template_id)"
+                        " VALUES (?, ?)",
+                        (profile, t.id),
+                    )
+                    continue
+                g = Generator(
+                    profile=profile,
+                    name=t.name,
+                    parent=ParentRef(kind="template", id=t.id),
+                )
+                self._insert_generator(c, g)
+                c.execute(
+                    "INSERT OR IGNORE INTO generator_seeds (profile, template_id)"
+                    " VALUES (?, ?)",
+                    (profile, t.id),
+                )
+                if log:
+                    self._log_event(
+                        c,
+                        GLOBAL_EVENT_SCOPE,
+                        "generator_created",
+                        self._generator_payload(g, seeded=True),
+                    )
+                created.append(g)
+        return created
+
+    # ------------------------------------------------------------ setups migration
+
+    def _migrate_setups_to_generators(self) -> None:
+        """One-shot, idempotent migration of the legacy two-layer setups into
+        templates + generators (docs/generators-api.md §Migration). The old
+        tables stay on disk untouched; a meta flag marks completion. Runs
+        silently (no events) at store init."""
+        with self._tx() as c:
+            if c.execute(
+                "SELECT 1 FROM meta WHERE key = 'setups_migrated'"
+            ).fetchone():
+                return
+            model_rows = c.execute("SELECT * FROM model_setups").fetchall()
+            for r in model_rows:
+                # template id = model_setup id (stable, collision-free uuids)
+                self._insert_template(
+                    c,
+                    Template(
+                        id=r["id"],
+                        name=r["name"],
+                        builtin=False,
+                        base_url=r["base_url"],
+                        model=r["model"],
+                        api_key=r["api_key"],
+                        api_key_env=r["api_key_env"],
+                        params=json.loads(r["params"]),
+                    ),
+                )
+            model_ids = {r["id"] for r in model_rows}
+            sampler_rows = c.execute("SELECT * FROM sampler_setups").fetchall()
+            profiles = [
+                r["name"]
+                for r in c.execute(
+                    "SELECT name FROM profiles WHERE active = 1 ORDER BY name"
+                ).fetchall()
+            ]
+            for s in sampler_rows:
+                if s["model_setup_id"] not in model_ids:
+                    logger.warning(
+                        "skipping sampler setup %r (%s): dangling model_setup_id %r",
+                        s["name"], s["id"], s["model_setup_id"],
+                    )
+                    continue
+                for profile in profiles:
+                    self._insert_generator(
+                        c,
+                        Generator(
+                            profile=profile,
+                            name=s["name"],
+                            parent=ParentRef(kind="template", id=s["model_setup_id"]),
+                            params=json.loads(s["params"]),
+                            # lets clients map old {kind:'sampler', id} settings
+                            # refs (activeGenerators) to this generator exactly
+                            migrated_from=s["id"],
+                        ),
+                    )
+            c.execute("INSERT INTO meta (key, value) VALUES ('setups_migrated', '1')")
+            if model_rows or sampler_rows:
+                logger.info(
+                    "migrated %d model setup(s) -> templates, %d sampler setup(s)"
+                    " x %d profile(s) -> generators",
+                    len(model_rows), len(sampler_rows), len(profiles),
+                )
 
     # ------------------------------------------------------------ profiles
     # Server-stored per-person client settings (keybindings, ui prefs, active
@@ -897,7 +1378,9 @@ class WeaveStore:
     def get_events(
         self, weave_id: str | None = None, since: int = 0, limit: int = 1000
     ) -> list[dict[str, Any]]:
-        """Events with seq > since, oldest first. `weave_id=None` = all weaves."""
+        """Events with seq > since, oldest first. `weave_id=None` = all weaves.
+        Weave-filtered queries also include global (template/generator) events,
+        which live under the empty-string scope."""
         with self._lock:
             if weave_id is None:
                 rows = self._conn.execute(
@@ -906,9 +1389,9 @@ class WeaveStore:
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT * FROM events WHERE weave_id = ? AND seq > ?"
-                    " ORDER BY seq LIMIT ?",
-                    (weave_id, since, limit),
+                    "SELECT * FROM events WHERE (weave_id = ? OR weave_id = ?)"
+                    " AND seq > ? ORDER BY seq LIMIT ?",
+                    (weave_id, GLOBAL_EVENT_SCOPE, since, limit),
                 ).fetchall()
         return [
             {

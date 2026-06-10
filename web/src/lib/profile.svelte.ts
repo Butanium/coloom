@@ -8,7 +8,7 @@
 // import {setSetting,getSetting} from here; this module imports nothing from
 // them. On login, App.svelte calls each store's applyProfileSettings().
 
-import { api, ApiError } from './api'
+import { api, ApiError, setApiProfile } from './api'
 
 const PROFILE_CACHE_KEY = 'coloom.profile'
 
@@ -90,6 +90,7 @@ export async function loginProfile(name: string): Promise<void> {
     }
     profile.name = trimmed
     profile.settings = settings
+    setApiProfile(trimmed) // X-Coloom-Profile on every request from here on
     localStorage.setItem(PROFILE_CACHE_KEY, trimmed)
     for (const apply of appliers) apply(settings)
   } finally {
@@ -101,6 +102,7 @@ export async function logoutProfile() {
   await flushProfileSave()
   profile.name = null
   profile.settings = {}
+  setApiProfile(null)
   localStorage.removeItem(PROFILE_CACHE_KEY)
   location.hash = '' // back to the picker route under the login gate
 }

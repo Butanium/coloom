@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from './api'
+  import ArmedButton from './ArmedButton.svelte'
   import { getSetting, logoutProfile, profile, setSetting } from './profile.svelte'
   import { withToast } from './state.svelte'
   import type { WeaveInfo } from './types'
@@ -85,8 +86,8 @@
     }
   }
 
+  // no native popup: the delete button itself is a two-step ArmedButton
   async function remove(w: WeaveInfo) {
-    if (!confirm(`Delete weave “${w.title}”? This removes all its nodes.`)) return
     await withToast(() => api.deleteWeave(w.id))
     await refresh()
   }
@@ -174,7 +175,14 @@
                   folder
                 </button>
               {/if}
-              <button class="danger" onclick={() => remove(w)}>delete</button>
+              <ArmedButton
+                label="delete"
+                confirmLabel="sure?"
+                title={`delete weave “${w.title}” and all its nodes`}
+                class="danger"
+                testid={`weave-delete-${w.id}`}
+                onconfirm={() => void remove(w)}
+              />
             </li>
           {/each}
         </ul>

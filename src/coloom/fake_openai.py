@@ -102,6 +102,14 @@ def build_app(default_seed: int | None = None, delay: float = 0.0) -> FastAPI:
     app = FastAPI(title="gpt-fake")
     counter = {"requests": 0}
 
+    @app.get("/v1/models")
+    async def models() -> dict:
+        # lets coloom's POST /probe-endpoint be exercised against the mock
+        return {
+            "object": "list",
+            "data": [{"id": "gpt-fake", "object": "model", "owned_by": "coloom"}],
+        }
+
     @app.post("/v1/completions")
     async def completions(request: Request) -> dict:
         body = await request.json()

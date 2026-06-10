@@ -97,28 +97,16 @@ export interface ThreadResponse {
   nodes: WeaveNode[]
 }
 
-export interface PresetInfo {
-  model: string
-  params: Record<string, unknown>
-  // endpoint info so the UI can clone a preset into an editable model setup
-  base_url?: string
-  api_key_env?: string | null
-}
+// ------------------------------------------------------- templates + generators
+// Two nouns (docs/generators-api.md): a TEMPLATE is a complete generator
+// definition on the shelf, server-global; a GENERATOR is the concrete,
+// activatable thing, per-profile, inheriting from a parent (template or
+// another generator of the same profile) with nullable-field overrides.
 
-export interface PresetsResponse {
-  presets: Record<string, PresetInfo>
-  default_preset: string | null
-}
-
-// -------------------------------------------------------------------- setups
-// Two-layer inference config (docs/setups-api.md): model setups carry an
-// endpoint + arbitrary default API flags; sampler setups reference a model and
-// override params. Several samplers can be ACTIVE at once (per-client state) —
-// generate fans out one request per active sampler.
-
-export interface ModelSetup {
+export interface Template {
   id: string
   name: string
+  builtin: boolean // imported from coloom.yaml presets; read-only via the API
   base_url: string
   model: string
   api_key?: string | null // redacted to "***" by the server when set
@@ -126,16 +114,39 @@ export interface ModelSetup {
   params: Record<string, unknown>
 }
 
-export interface SamplerSetup {
+export interface ParentRef {
+  kind: 'template' | 'generator'
   id: string
-  name: string
-  model_setup_id: string
-  params: Record<string, unknown>
 }
 
-export interface SetupsResponse {
-  models: ModelSetup[]
-  samplers: SamplerSetup[]
+/** The fields a generator inherits/overrides, fully resolved leaf→root. */
+export interface ResolvedGenerator {
+  base_url: string | null
+  model: string | null
+  api_key?: string | null // redacted to "***" when set anywhere in the chain
+  api_key_env?: string | null
+  params: Record<string, unknown> // merged root → leaf, leaf wins
+}
+
+export interface Generator {
+  id: string
+  profile: string
+  name: string
+  parent: ParentRef | null
+  // null = inherited from the parent chain
+  base_url?: string | null
+  model?: string | null
+  api_key?: string | null
+  api_key_env?: string | null
+  params: Record<string, unknown> // own overridden keys only
+  resolved: ResolvedGenerator
+  usable: boolean // false until base_url + model resolve non-empty
+}
+
+export interface ProbeResult {
+  ok: boolean
+  error: string | null
+  models: string[]
 }
 
 export interface WeaveEvent {
@@ -147,12 +158,20 @@ export interface WeaveEvent {
     | 'weave_deleted'
     | 'node_added'
     | 'node_removed'
+    | 'node_restored' // undo of a (soft) deletion — task #3 restore endpoint
     | 'node_updated'
     | 'node_split'
     | 'cursor_moved'
     | 'cursor_removed'
     | 'gen_started'
     | 'gen_finished'
+    // global (not weave-scoped) — payload {id, name, profile?, by, origin}
+    | 'template_created'
+    | 'template_updated'
+    | 'template_deleted'
+    | 'generator_created'
+    | 'generator_updated'
+    | 'generator_deleted'
   payload: Record<string, unknown>
   created: string
 }
@@ -162,7 +181,7 @@ export interface ActiveGen {
   gen_id: string
   requester: string | null
   node_id: string
-  preset: string | null
+  generator: string | null // generator name
   started: string
 }
 

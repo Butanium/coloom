@@ -7,11 +7,14 @@
 
 import { SvelteSet } from 'svelte/reactivity'
 import { api, ApiError, CLIENT_ID } from './api'
-import { getSetting, onProfileLogin, setSetting } from './profile.svelte'
+import { askConfirm } from './confirm.svelte'
+import { onProfileLogin, profile, setSetting } from './profile.svelte'
+import { pushUndo, undoEntry, undoLast, undoStack } from './undo.svelte'
 import type {
   ActiveGen,
-  PresetsResponse,
-  SetupsResponse,
+  Generator,
+  ResolvedGenerator,
+  Template,
   Tokens,
   TopLogprob,
   Weave,
@@ -38,17 +41,28 @@ export function setIdentity(name: string) {
 
 // ---------------------------------------------------------------- toasts
 
+export interface ToastAction {
+  label: string
+  run: () => void
+}
+
 export interface Toast {
   id: number
   message: string
+  action?: ToastAction // e.g. the post-delete "undo" button
+  kind: 'danger' | 'info' // danger = errors (default); info = neutral notices
 }
 
 export const toasts = $state<{ items: Toast[] }>({ items: [] })
 let nextToastId = 1
 
-export function toast(message: string) {
+export function toast(
+  message: string,
+  action?: ToastAction,
+  kind: 'danger' | 'info' = 'danger',
+) {
   const id = nextToastId++
-  toasts.items.push({ id, message })
+  toasts.items.push({ id, message, action, kind })
   setTimeout(() => dismissToast(id), 8000)
 }
 
@@ -82,11 +96,10 @@ export const session = $state<{
   activeGens: ActiveGen[]
   // rolling event buffer for the activity feed (backfilled on open, capped)
   events: WeaveEvent[]
-  presets: PresetsResponse | null
-  selectedPreset: string | null
-  paramOverrides: Record<string, unknown>
-  // two-layer inference setups (docs/setups-api.md); refreshed via refreshSetups()
-  setups: SetupsResponse | null
+  // templates + my profile's generators (docs/generators-api.md); null until
+  // the first refreshGenerators() after login
+  templates: Template[] | null
+  generators: Generator[] | null
 }>({
   weave: null,
   loading: false,
@@ -98,174 +111,287 @@ export const session = $state<{
   inflight: 0,
   activeGens: [],
   events: [],
-  presets: null,
-  selectedPreset: null,
-  paramOverrides: {},
-  setups: null,
+  templates: null,
+  generators: null,
 })
 
-// ------------------------------------------------------------ active generators
-// A "generator" is anything you can weave with: a sampler setup or a YAML
-// preset. SEVERAL can be active at once — generate fans out one request per
-// active generator. A separate hidden set controls which chips are displayed.
-// Per-client, localStorage-persisted (will move into profile settings).
+// ------------------------------------------------------------ generators
+// A GENERATOR (docs/generators-api.md) is the per-profile activatable thing,
+// inheriting from a template or another generator. SEVERAL can be active at
+// once — generate fans out one request per active generator. A separate
+// hidden set controls which chips are displayed, and exactly ONE generator
+// has FOCUS: the quick param row + drag-to-adjust edit the focused one.
+// Active/hidden persist per profile (server-side settings); focus is local.
 
-export interface GeneratorRef {
-  kind: 'sampler' | 'preset'
-  id: string // sampler setup id, or preset name
-}
-
-export function generatorKey(ref: GeneratorRef): string {
-  return `${ref.kind}:${ref.id}`
-}
-
-const GENERATORS_KEY = 'coloom.activeGenerators'
-const HIDDEN_GENERATORS_KEY = 'coloom.hiddenGenerators'
-const LEGACY_SAMPLERS_KEY = 'coloom.activeSamplers'
-
-function loadGeneratorList(key: string): GeneratorRef[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(key) ?? '[]')
-    if (!Array.isArray(v)) return []
-    return v.filter(
-      (x) =>
-        x &&
-        (x.kind === 'sampler' || x.kind === 'preset') &&
-        typeof x.id === 'string',
-    )
-  } catch {
-    return []
-  }
-}
-
-function loadActiveGenerators(): GeneratorRef[] {
-  const refs = loadGeneratorList(GENERATORS_KEY)
-  // migrate the pre-unification sampler-id list
-  try {
-    const legacy = JSON.parse(localStorage.getItem(LEGACY_SAMPLERS_KEY) ?? '[]')
-    if (Array.isArray(legacy)) {
-      for (const id of legacy) {
-        if (typeof id === 'string' && !refs.some((r) => r.kind === 'sampler' && r.id === id)) {
-          refs.push({ kind: 'sampler', id })
-        }
-      }
-    }
-    localStorage.removeItem(LEGACY_SAMPLERS_KEY)
-  } catch {
-    // ignore unparseable legacy state
-  }
-  return refs
-}
-
-export const activeGenerators = $state<{ list: GeneratorRef[] }>({
-  list: loadActiveGenerators(),
-})
-export const hiddenGenerators = $state<{ keys: string[] }>({
-  keys: loadGeneratorList(HIDDEN_GENERATORS_KEY).map(generatorKey),
-})
+export const generatorUi = $state<{
+  active: string[] // generator ids, persisted in profile settings
+  hidden: string[] // generator ids, persisted in profile settings
+  focusedId: string | null // last body-clicked chip; resolution in focusedGeneratorId()
+  // chips whose ANCESTOR (template / parent generator) was changed by someone
+  // else — tinted until focused (id → who/what for the tooltip)
+  stale: Record<string, { by: string; kind: string; name: string }>
+}>({ active: [], hidden: [], focusedId: null, stale: {} })
 
 function persistGenerators() {
-  localStorage.setItem(GENERATORS_KEY, JSON.stringify(activeGenerators.list))
-  localStorage.setItem(
-    HIDDEN_GENERATORS_KEY,
-    JSON.stringify(
-      hiddenGenerators.keys.map((k) => {
-        const [kind, ...rest] = k.split(':')
-        return { kind, id: rest.join(':') }
-      }),
-    ),
-  )
-  setSetting('activeGenerators', $state.snapshot(activeGenerators.list))
-  setSetting('hiddenGenerators', [...hiddenGenerators.keys])
+  setSetting('activeGenerators', [...generatorUi.active])
+  setSetting('hiddenGenerators', [...generatorUi.hidden])
 }
 
-export function isGeneratorActive(ref: GeneratorRef): boolean {
-  return activeGenerators.list.some((r) => generatorKey(r) === generatorKey(ref))
+export function isGeneratorActive(id: string): boolean {
+  return generatorUi.active.includes(id)
 }
 
-export function toggleActiveGenerator(ref: GeneratorRef) {
-  const activating = !isGeneratorActive(ref)
-  activeGenerators.list = activating
-    ? [...activeGenerators.list, ref]
-    : activeGenerators.list.filter((r) => generatorKey(r) !== generatorKey(ref))
+export function toggleActiveGenerator(id: string) {
+  const activating = !isGeneratorActive(id)
+  generatorUi.active = activating
+    ? [...generatorUi.active, id]
+    : generatorUi.active.filter((x) => x !== id)
   // an active-but-hidden chip would be invisible — activating implies shown
   if (activating) {
-    hiddenGenerators.keys = hiddenGenerators.keys.filter((k) => k !== generatorKey(ref))
+    generatorUi.hidden = generatorUi.hidden.filter((x) => x !== id)
   }
   persistGenerators()
 }
 
-export function isGeneratorHidden(ref: GeneratorRef): boolean {
-  return hiddenGenerators.keys.includes(generatorKey(ref))
+export function isGeneratorHidden(id: string): boolean {
+  return generatorUi.hidden.includes(id)
 }
 
-export function toggleHiddenGenerator(ref: GeneratorRef) {
-  const key = generatorKey(ref)
-  hiddenGenerators.keys = hiddenGenerators.keys.includes(key)
-    ? hiddenGenerators.keys.filter((k) => k !== key)
-    : [...hiddenGenerators.keys, key]
+export function toggleHiddenGenerator(id: string) {
+  generatorUi.hidden = generatorUi.hidden.includes(id)
+    ? generatorUi.hidden.filter((x) => x !== id)
+    : [...generatorUi.hidden, id]
   persistGenerators()
 }
 
-// On profile login: profile settings override the local fallbacks; a profile
-// that never stored a key gets seeded from the current local state (so the
-// pre-profiles localStorage world migrates in on first login).
-onProfileLogin((settings) => {
-  const u = settings.ui as Partial<typeof ui> | undefined
-  if (u) Object.assign(ui, u)
-  else persistUi()
-  const act = settings.activeGenerators as GeneratorRef[] | undefined
-  if (act) activeGenerators.list = act
-  const hid = settings.hiddenGenerators as string[] | undefined
-  if (hid) hiddenGenerators.keys = hid
-  if (!act || !hid) persistGenerators()
-})
+/** Chip display list: my generators in server order, hidden filtered out.
+ * Shared by GenControls and the digit-key toggles. */
+export function visibleGenerators(): Generator[] {
+  return (session.generators ?? []).filter((g) => !isGeneratorHidden(g.id))
+}
 
-/** Display list for generator chips: samplers first, then presets, hidden
- * filtered out. Shared by GenControls and the digit-key toggles. */
-export function visibleGenerators(): { ref: GeneratorRef; label: string }[] {
-  const out: { ref: GeneratorRef; label: string }[] = []
-  for (const s of session.setups?.samplers ?? []) {
-    const ref: GeneratorRef = { kind: 'sampler', id: s.id }
-    if (!isGeneratorHidden(ref)) out.push({ ref, label: s.name })
+/** Active generators that actually exist right now (stale ids filtered). */
+export function validActiveGenerators(): Generator[] {
+  return (session.generators ?? []).filter((g) => isGeneratorActive(g.id))
+}
+
+/** Exactly one generator holds focus: the last body-clicked chip, defaulting
+ * to the first active visible chip, else the first visible chip. */
+export function focusedGenerator(): Generator | null {
+  const vis = visibleGenerators()
+  if (generatorUi.focusedId !== null) {
+    const g = vis.find((x) => x.id === generatorUi.focusedId)
+    if (g) return g
   }
-  for (const name of Object.keys(session.presets?.presets ?? {})) {
-    const ref: GeneratorRef = { kind: 'preset', id: name }
-    if (!isGeneratorHidden(ref)) out.push({ ref, label: name })
+  return vis.find((g) => isGeneratorActive(g.id)) ?? vis[0] ?? null
+}
+
+/** Body-click focus: binds the quick row to this generator + clears its
+ * stale-ancestor badge ("I've seen it"). */
+export function focusGenerator(id: string) {
+  generatorUi.focusedId = id
+  if (generatorUi.stale[id]) {
+    delete generatorUi.stale[id]
+  }
+}
+
+export function generatorById(id: string | null | undefined): Generator | null {
+  return (session.generators ?? []).find((g) => g.id === id) ?? null
+}
+
+export function templateById(id: string | null | undefined): Template | null {
+  return (session.templates ?? []).find((t) => t.id === id) ?? null
+}
+
+/** The parent chain of a generator, leaf-most parent first, ending at a
+ * template when the chain reaches one. Cycle-safe (server rejects cycles, but
+ * never trust data not to be mid-transition). */
+export function ancestorsOf(gen: Generator): ({ kind: 'template'; t: Template } | { kind: 'generator'; g: Generator })[] {
+  const out: ({ kind: 'template'; t: Template } | { kind: 'generator'; g: Generator })[] = []
+  const seen = new Set<string>([gen.id])
+  let parent = gen.parent
+  while (parent) {
+    if (parent.kind === 'template') {
+      const t = templateById(parent.id)
+      if (t) out.push({ kind: 'template', t })
+      break
+    }
+    const g = generatorById(parent.id)
+    if (!g || seen.has(g.id)) break
+    seen.add(g.id)
+    out.push({ kind: 'generator', g })
+    parent = g.parent
   }
   return out
 }
 
-/** Active generators that actually exist right now (stale refs filtered). */
-export function validActiveGenerators(): GeneratorRef[] {
-  return activeGenerators.list.filter((g) =>
-    g.kind === 'sampler'
-      ? (session.setups?.samplers ?? []).some((s) => s.id === g.id)
-      : session.presets?.presets[g.id] !== undefined,
+/** What `gen` INHERITS from its parent chain (its own overrides excluded) —
+ * the placeholder values shown under un-overridden fields. */
+export function inheritedView(gen: Generator): ResolvedGenerator {
+  return mergeChain(ancestorsOf(gen))
+}
+
+/** Same, but from an arbitrary parent ref (the drawer form previews
+ * placeholders for the parent currently SELECTED, not the one saved). */
+export function resolveParentChain(parent: Generator['parent']): ResolvedGenerator {
+  if (parent === null) return mergeChain([])
+  if (parent.kind === 'template') {
+    const t = templateById(parent.id)
+    return mergeChain(t ? [{ kind: 'template', t }] : [])
+  }
+  const g = generatorById(parent.id)
+  if (!g) return mergeChain([])
+  // the parent's own fields count too: chain = parent + its ancestors
+  return mergeChain([{ kind: 'generator', g }, ...ancestorsOf(g)])
+}
+
+function mergeChain(chain: ReturnType<typeof ancestorsOf>): ResolvedGenerator {
+  const out: ResolvedGenerator = {
+    base_url: null,
+    model: null,
+    api_key: null,
+    api_key_env: null,
+    params: {},
+  }
+  // scalars: nearest-set wins (walk leafward = chain order)
+  for (const a of chain) {
+    const src = a.kind === 'template' ? a.t : a.g
+    out.base_url ??= src.base_url ?? null
+    out.model ??= src.model ?? null
+    out.api_key ??= src.api_key ?? null
+    out.api_key_env ??= src.api_key_env ?? null
+  }
+  // params: merge root → leaf, leaf wins
+  for (const a of [...chain].reverse()) {
+    const src = a.kind === 'template' ? a.t : a.g
+    out.params = { ...out.params, ...src.params }
+  }
+  return out
+}
+
+/** Generators that would be FLATTENED by deleting `kind`/`id` (direct
+ * children) — surfaced in the delete confirms. */
+export function directChildrenOf(kind: 'template' | 'generator', id: string): Generator[] {
+  return (session.generators ?? []).filter(
+    (g) => g.parent !== null && g.parent.kind === kind && g.parent.id === id,
   )
 }
 
-export async function refreshSetups() {
+/** Delete a generator behind an IN-APP confirm that warns children get
+ * FLATTENED (resolved fields materialized into them). Shared by the chips
+ * menu and the drawer. skipConfirm (shift+click) deletes immediately.
+ * Returns true when the delete ran. */
+export async function confirmDeleteGenerator(
+  g: Generator,
+  opts: { skipConfirm?: boolean } = {},
+): Promise<boolean> {
+  if (!opts.skipConfirm) {
+    const kids = directChildrenOf('generator', g.id)
+    const warn =
+      kids.length > 0
+        ? `${kids.length} generator${kids.length > 1 ? 's' : ''} inherit from it (${kids
+            .map((k) => k.name)
+            .join(', ')}) — they will be FLATTENED: the inherited values get materialized into them.`
+        : ''
+    const ok = await askConfirm({
+      title: `Delete generator "${g.name}"?`,
+      body: warn,
+      confirmLabel: 'delete',
+      danger: true,
+    })
+    if (!ok) return false
+  }
+  await withToast(async () => {
+    await api.deleteGenerator(g.id)
+    await refreshGenerators()
+  })
+  return true
+}
+
+/** Ids of `gen` + everything below it — excluded from its parent picker
+ * (assigning one would create a cycle). */
+export function descendantIdsOf(genId: string): Set<string> {
+  const out = new Set<string>([genId])
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const g of session.generators ?? []) {
+      if (g.parent?.kind === 'generator' && out.has(g.parent.id) && !out.has(g.id)) {
+        out.add(g.id)
+        grew = true
+      }
+    }
+  }
+  return out
+}
+
+export async function refreshGenerators() {
+  if (profile.name === null) return
+  const name = profile.name
   try {
-    session.setups = await api.listSetups()
-    // drop active sampler refs that no longer exist
-    const known = new Set(session.setups.samplers.map((s) => s.id))
-    const kept = activeGenerators.list.filter(
-      (r) => r.kind !== 'sampler' || known.has(r.id),
-    )
-    if (kept.length !== activeGenerators.list.length) {
-      activeGenerators.list = kept
+    const [templates, generators] = await Promise.all([
+      api.listTemplates(),
+      api.listGenerators(name),
+    ])
+    if (profile.name !== name) return // logged out / switched mid-fetch
+    session.templates = templates
+    session.generators = generators
+    // drop active/hidden ids that no longer exist (deleted generators)
+    const known = new Set(generators.map((g) => g.id))
+    const active = generatorUi.active.filter((id) => known.has(id))
+    const hidden = generatorUi.hidden.filter((id) => known.has(id))
+    if (
+      active.length !== generatorUi.active.length ||
+      hidden.length !== generatorUi.hidden.length
+    ) {
+      generatorUi.active = active
+      generatorUi.hidden = hidden
       persistGenerators()
     }
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) {
-      // server without the setups API — behave as "no setups defined"
-      session.setups = { models: [], samplers: [] }
-      return
-    }
-    toast(`failed to load setups: ${e}`)
+    toast(`failed to load generators: ${e}`)
   }
 }
+
+// ---- login: apply profile settings ------------------------------------------
+// activeGenerators / hiddenGenerators are string[] of generator ids. Anything
+// else (the pre-redesign {kind,id} refs, ids of deleted generators) is simply
+// DISCARDED — dev mode, no legacy migration (Clément 2026-06-10). Discarding
+// only ever touches these two keys: setSetting merges into the loaded
+// settings blob, so every other profile key survives untouched.
+
+async function applyGeneratorSettings(settings: Record<string, unknown>) {
+  await refreshGenerators()
+  // fetch failed → don't interpret (and NEVER persist) against an empty list;
+  // the raw settings stay untouched server-side for the next login
+  if (session.generators === null) return
+  const generators = session.generators
+  const validIds = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter(
+          (v): v is string =>
+            typeof v === 'string' && generators.some((g) => g.id === v),
+        )
+      : []
+  const act = validIds(settings.activeGenerators)
+  const hid = validIds(settings.hiddenGenerators)
+  generatorUi.active = act
+  generatorUi.hidden = hid
+  generatorUi.focusedId = null
+  generatorUi.stale = {}
+  const changed = (value: unknown, ids: string[]) =>
+    Array.isArray(value) ? value.length !== ids.length : value !== undefined
+  if (changed(settings.activeGenerators, act) || changed(settings.hiddenGenerators, hid)) {
+    persistGenerators() // write back the cleaned shape
+  }
+}
+
+onProfileLogin((settings) => {
+  const u = settings.ui as Partial<typeof ui> | undefined
+  if (u) Object.assign(ui, u)
+  else persistUi()
+  void applyGeneratorSettings(settings)
+})
 
 const EVENT_BUFFER_CAP = 500
 
@@ -367,6 +493,17 @@ export function myCursorNodeId(): string | null {
   return session.weave?.cursors[identity.name]?.node_id ?? null
 }
 
+// Dev/test introspection: lets playwright tests / debugging read client-side
+// state (e.g. "where does THIS tab think my cursor is") without scraping the
+// DOM. Dev builds only; assertions still go through REST per test conventions.
+if (import.meta.env.DEV) {
+  ;(window as unknown as Record<string, unknown>).__coloom = {
+    session,
+    identity,
+    myCursorNodeId,
+  }
+}
+
 // ---------------------------------------------------------------- weave sync
 
 let activeWeaveId: string | null = null
@@ -374,6 +511,16 @@ let ws: WebSocket | null = null
 let reconnectDelay = 500
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refetchQueued = false
+// Stale-snapshot guard: a snapshot fetch can resolve AFTER events that are
+// NEWER than it were patched locally (e.g. delete → refetch starts → a
+// cursor_moved lands and patches → stale snapshot assigns and silently
+// undoes the patch, with no later event to correct it). Cure: remember
+// events patched while any fetch is in flight and RE-APPLY them on top of
+// the assigned snapshot (patches are idempotent), and let only the
+// latest-initiated fetch assign (overlapping fetches resolve out of order).
+let refetchSeq = 0
+let refetchesInFlight = 0
+let patchedDuringRefetch: WeaveEvent[] = []
 
 async function refetchWeave() {
   if (activeWeaveId === null || refetchQueued) return
@@ -382,9 +529,15 @@ async function refetchWeave() {
   refetchQueued = false
   const id = activeWeaveId
   if (id === null) return
+  const mySeq = ++refetchSeq
+  refetchesInFlight++
   try {
     const weave = await api.getWeave(id)
-    if (activeWeaveId === id) session.weave = weave
+    if (activeWeaveId === id && mySeq === refetchSeq) {
+      session.weave = weave
+      for (const ev of patchedDuringRefetch) patchEventLocally(ev)
+      patchedDuringRefetch = []
+    }
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {
       toast('this weave was deleted')
@@ -393,6 +546,9 @@ async function refetchWeave() {
     } else {
       toast(`weave refetch failed: ${e}`)
     }
+  } finally {
+    refetchesInFlight--
+    if (refetchesInFlight === 0) patchedDuringRefetch = []
   }
 }
 
@@ -406,7 +562,7 @@ function trackEvent(event: WeaveEvent) {
       gen_id: event.payload.gen_id as string,
       requester: (event.payload.requester as string | null) ?? null,
       node_id: event.payload.node_id as string,
-      preset: (event.payload.preset as string | null) ?? null,
+      generator: (event.payload.generator as string | null) ?? null,
       started: event.created,
     })
   } else if (event.type === 'gen_finished') {
@@ -472,7 +628,52 @@ function patchEventLocally(event: WeaveEvent): boolean {
   return false
 }
 
+// ---- global (non-weave-scoped) template/generator change events ------------
+
+const GLOBAL_EVENT_TYPES = new Set([
+  'template_created',
+  'template_updated',
+  'template_deleted',
+  'generator_created',
+  'generator_updated',
+  'generator_deleted',
+])
+
+/** Is the changed thing (a template or a generator) an ancestor of `gen`? */
+function hasAncestor(gen: Generator, kind: 'template' | 'generator', id: string): boolean {
+  return ancestorsOf(gen).some((a) =>
+    a.kind === 'template' ? kind === 'template' && a.t.id === id : kind === 'generator' && a.g.id === id,
+  )
+}
+
+/** Template/generator mutations broadcast to every client. Skip own echoes
+ * (this tab already refreshed after its mutation); for remote changes, badge
+ * any of MY chips whose ancestor changed, then refetch the lists. */
+function handleGlobalEvent(event: WeaveEvent) {
+  trackEvent(event) // activity feed: "clément edited template gpt4-base"
+  if (isOwnEvent(event)) return
+  const by = (event.payload.by as string | null) ?? null
+  const id = event.payload.id as string
+  const name = (event.payload.name as string) ?? '?'
+  const kind = event.type.startsWith('template_') ? 'template' : 'generator'
+  // Badge BEFORE refetching: a deleted template flattens its generators, so
+  // the ancestry is only visible in the pre-refresh snapshot. Remote edits can
+  // only move a chip's inherited fields — overrides are untouchable by others.
+  if (by !== null && by !== profile.name) {
+    for (const g of session.generators ?? []) {
+      if (hasAncestor(g, kind, id)) {
+        generatorUi.stale[g.id] = { by, kind, name }
+      }
+    }
+  }
+  void refreshGenerators()
+}
+
 function handleEvent(event: WeaveEvent) {
+  if (GLOBAL_EVENT_TYPES.has(event.type)) {
+    handleGlobalEvent(event)
+    return
+  }
   if (event.weave_id !== activeWeaveId) return
   trackEvent(event)
   if (event.type === 'node_added' || event.type === 'node_split') {
@@ -481,7 +682,11 @@ function handleEvent(event: WeaveEvent) {
     session.changedAt = Date.now()
   }
   if (event.type === 'gen_started' || event.type === 'gen_finished') return // no weave mutation
-  if (patchEventLocally(event)) return
+  if (patchEventLocally(event)) {
+    // remember patches an in-flight snapshot might be staler than
+    if (refetchesInFlight > 0) patchedDuringRefetch.push(event)
+    return
+  }
   void refetchWeave()
 }
 
@@ -527,16 +732,8 @@ export async function openWeave(weaveId: string) {
     toast(`failed to backfill events: ${e}`)
   }
   connectWs(weaveId)
-  if (session.presets === null) {
-    try {
-      session.presets = await api.listPresets()
-      session.selectedPreset =
-        session.presets.default_preset ?? Object.keys(session.presets.presets)[0] ?? null
-    } catch (e) {
-      toast(`failed to load presets: ${e}`)
-    }
-  }
-  if (session.setups === null) void refreshSetups()
+  // generators load on profile login; cover direct deep-links that race it
+  if (session.generators === null) void refreshGenerators()
 }
 
 export function closeWeave() {
@@ -557,27 +754,28 @@ export function closeWeave() {
 
 // ---------------------------------------------------------------- actions
 
-/** Generate at a node. With active generators (samplers and/or presets), fans
- * out ONE request per generator (children from each model/temp appear side by
- * side); otherwise falls back to the selected preset. Only the first request
- * may move the cursor. */
+/** Generate at a node: fans out ONE request per ACTIVE generator (children
+ * from each model/temp appear side by side). With nothing active, falls back
+ * to the FOCUSED generator so a fresh profile's weave button still works.
+ * Only the first request may move the cursor. */
 export async function generateAt(nodeId: string, opts: { moveCursor?: boolean } = {}) {
   const weave = session.weave
   if (!weave) return
-  const base = {
+  let gens = validActiveGenerators()
+  if (gens.length === 0) {
+    const focused = focusedGenerator()
+    if (focused === null) {
+      toast('no generator available — create one in the generators drawer')
+      return
+    }
+    gens = [focused]
+  }
+  const requests = gens.map((g, i) => ({
     nodeId,
     cursor: identity.name,
-    params: session.paramOverrides,
-  }
-  const gens = validActiveGenerators()
-  const requests =
-    gens.length > 0
-      ? gens.map((g, i) => ({
-          ...base,
-          ...(g.kind === 'sampler' ? { samplerId: g.id } : { preset: g.id }),
-          moveCursor: (opts.moveCursor ?? false) && i === 0,
-        }))
-      : [{ ...base, preset: session.selectedPreset, moveCursor: opts.moveCursor ?? false }]
+    generatorId: g.id,
+    moveCursor: (opts.moveCursor ?? false) && i === 0,
+  }))
   session.inflight += requests.length
   await Promise.all(
     requests.map((req) =>
@@ -701,16 +899,96 @@ export async function branchAtToken(
   })
 }
 
-/** Delete all children of a node (each cascades through its own subtree). */
+// ---- node deletion + undo ---------------------------------------------------
+// Deletions ask NO confirmation: the server soft-deletes, an inverse op lands
+// on the undo stack (undo.svelte.ts), and a toast offers an "undo" button.
+// Ctrl+Z (rebindable 'undo' action) pops the stack for the open weave.
+
+interface MovedCursor {
+  name: string
+  from: string
+  to: string | null // null = the cursor was removed (its node was a root)
+}
+
+/** After a restore, put back the cursors the deletion had relocated — but
+ * only those still parked where the delete left them (never yank a cursor
+ * its owner has since moved deliberately). */
+async function moveCursorsBack(weaveId: string, moved: MovedCursor[]) {
+  for (const m of moved) {
+    const cur = session.weave?.cursors[m.name]
+    const undisturbed = cur === undefined ? m.to === null : cur.node_id === m.to
+    if (!undisturbed) continue
+    await api.setCursor(weaveId, m.name, m.from, identity.name)
+  }
+}
+
+/** Register the inverse of a deletion: an undo-stack entry that calls the
+ * restore endpoint (once per deletion-op root) and re-parks relocated
+ * cursors, plus the post-delete toast with its "undo" button. `rootIds` =
+ * the ids DELETE was called on; the server restores each root's whole
+ * cascaded subtree. */
+function registerDeletionUndo(
+  weaveId: string,
+  rootIds: string[],
+  removed: number,
+  movedCursors: MovedCursor[],
+) {
+  const what = removed === 1 ? 'node deleted' : `${removed} nodes deleted`
+  const entry = pushUndo(what, weaveId, async () => {
+    let restored = 0
+    for (const id of rootIds) {
+      try {
+        restored += (await api.restoreNode(weaveId, id)).restored_node_ids.length
+      } catch (e) {
+        // 409 = this root is no longer deleted (a sibling restore already
+        // brought it back as a deleted-ancestor op, or another client undid
+        // it) — that's the desired end state, keep restoring the rest
+        if (!(e instanceof ApiError && e.status === 409)) throw e
+      }
+    }
+    await moveCursorsBack(weaveId, movedCursors)
+    toast(restored === 1 ? 'node restored' : `${restored} nodes restored`, undefined, 'info')
+  })
+  toast(what, { label: 'undo', run: () => void withToast(() => undoEntry(entry)) }, 'info')
+}
+
+/** Ctrl+Z entry point. Returns true when the key was consumed (an undo ran,
+ * or there was nothing to undo and we said so). */
+export function undoLastAction(): boolean {
+  const weave = session.weave
+  if (!weave) return false
+  if (!undoStack.items.some((e) => e.weaveId === weave.id)) {
+    toast('nothing to undo', undefined, 'info')
+    return true
+  }
+  void withToast(() => undoLast(weave.id))
+  return true
+}
+
+/** Delete all children of a node (each cascades through its own subtree).
+ * The whole batch becomes ONE undo entry. */
 export async function deleteChildren(nodeId: string) {
   const weave = session.weave
   if (!weave) return
   const node = weave.nodes[nodeId]
   if (!node) return
+  await deleteNodes([...node.children])
+}
+
+/** Bulk delete (multi-select bar, delete-children): one undo entry + one
+ * toast for the batch. Cascades handle descendants server-side. */
+export async function deleteNodes(ids: string[]) {
+  const weave = session.weave
+  if (!weave || ids.length === 0) return
   await withToast(async () => {
-    for (const child of node.children) {
-      await api.removeNode(weave.id, child)
+    let removed = 0
+    const movedCursors: MovedCursor[] = []
+    for (const id of ids) {
+      const res = await api.removeNode(weave.id, id)
+      removed += (res.deleted_node_ids ?? res.removed ?? [id]).length
+      movedCursors.push(...(res.moved_cursors ?? []))
     }
+    if (removed > 0) registerDeletionUndo(weave.id, ids, removed, movedCursors)
   })
 }
 
@@ -725,5 +1003,15 @@ export async function toggleBookmark(nodeId: string) {
 export async function deleteNode(nodeId: string) {
   const weave = session.weave
   if (!weave) return
-  await withToast(() => api.removeNode(weave.id, nodeId))
+  await withToast(async () => {
+    const res = await api.removeNode(weave.id, nodeId)
+    // ?? fallbacks: a pre-soft-delete server (deploy window) lacks the new
+    // fields; deletion still works, undo will surface its 404 honestly
+    registerDeletionUndo(
+      weave.id,
+      [nodeId],
+      (res.deleted_node_ids ?? res.removed ?? [nodeId]).length,
+      res.moved_cursors ?? [],
+    )
+  })
 }

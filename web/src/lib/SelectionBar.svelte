@@ -1,11 +1,12 @@
 <!-- Floating bulk-action bar for the canvas multi-select: appears while the
-     selection is non-empty. Delete cascades subtrees (confirm names the count);
+     selection is non-empty. Delete cascades subtrees with NO confirmation —
+     the whole batch is one undo entry (toast "undo" button / Ctrl+Z restores);
      selected descendants of another selected node are skipped (their ancestor's
      cascade removes them). -->
 <script lang="ts">
   import { api } from './api'
   import { clearSelection, validSelection } from './selection.svelte'
-  import { collapsed, session, withToast } from './state.svelte'
+  import { collapsed, deleteNodes, session, withToast } from './state.svelte'
   import type { Weave } from './types'
 
   const ids = $derived(validSelection())
@@ -47,15 +48,9 @@
     const weave = session.weave
     if (!weave || busy) return
     const doomed = topmostOnly(weave, ids)
-    const msg =
-      `Delete ${ids.length} selected node(s)? ` +
-      'Deletion CASCADES: every selected node’s entire subtree is removed too.'
-    if (!confirm(msg)) return
     busy = true
     try {
-      for (const id of doomed) {
-        await withToast(() => api.removeNode(weave.id, id))
-      }
+      await deleteNodes(doomed) // one undo entry + "undo" toast for the batch
       clearSelection()
     } finally {
       busy = false

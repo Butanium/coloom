@@ -10,8 +10,9 @@ export default defineConfig({
     proxy: {
       '/weaves': backend,
       '/events': backend,
-      '/presets': backend,
-      '/setups': backend,
+      '/templates': backend,
+      '/generators': backend,
+      '/probe-endpoint': backend,
       '/profiles': backend,
       '/ws': { target: backend, ws: true },
     },

@@ -2,12 +2,22 @@
   // Profile-select gate: the app opens here. A profile carries all per-person
   // client state (identity, ui prefs, generators, keybindings) server-side.
   import { api } from './api'
+  import ArmedButton from './ArmedButton.svelte'
   import { loginProfile } from './profile.svelte'
   import { toast, withToast } from './state.svelte'
 
   let profiles = $state<{ name: string; updated: string }[]>([])
   let loaded = $state(false)
   let newName = $state('')
+
+  // uitest-* profiles are UI-test fixtures: hidden from the gate unless the
+  // page was opened with ?test=true (hash routing → /?test=true#/). Logging
+  // into one by typing its name still works — only the LIST is filtered.
+  const showTestProfiles =
+    new URLSearchParams(location.search).get('test') === 'true'
+  const shown = $derived(
+    profiles.filter((p) => showTestProfiles || !p.name.startsWith('uitest-')),
+  )
 
   async function refresh() {
     await withToast(async () => {
@@ -33,15 +43,9 @@
     await withToast(() => loginProfile(name))
   }
 
-  async function remove(name: string, e: Event) {
-    e.stopPropagation()
-    if (
-      !confirm(
-        `remove profile "${name}" from this list? its settings are kept — ` +
-          `logging in with the same name brings everything back`,
-      )
-    )
-      return
+  // no native popup: the ✕ is a two-step ArmedButton (soft delete — settings
+  // are kept; logging in with the same name brings everything back)
+  async function remove(name: string) {
     await withToast(async () => {
       await api.deleteProfile(name)
       await refresh()
@@ -55,19 +59,21 @@
     <p class="sub">who's weaving?</p>
     {#if loaded}
       <ul class="profiles" data-testid="profile-list">
-        {#each profiles as p (p.name)}
+        {#each shown as p (p.name)}
           <li>
             <button class="profile" onclick={() => pick(p.name)} data-testid={`profile-${p.name}`}>
               <span class="dot" style:background={`hsl(${[...p.name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0) % 360}, 65%, 60%)`}
               ></span>
               {p.name}
             </button>
-            <button
+            <ArmedButton
+              label="✕"
+              confirmLabel="sure?"
+              title="remove from this list (settings are kept — logging back in restores everything)"
               class="rm"
-              title="delete profile"
-              onclick={(e) => remove(p.name, e)}
-              data-testid={`profile-delete-${p.name}`}>✕</button
-            >
+              testid={`profile-delete-${p.name}`}
+              onconfirm={() => void remove(p.name)}
+            />
           </li>
         {:else}
           <li class="empty">no profiles yet — create one below</li>
@@ -146,13 +152,14 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .rm {
+  /* :global — the ✕ lives inside the ArmedButton child component */
+  .profiles li :global(.rm) {
     color: var(--text-dim);
     background: none;
     border-color: transparent;
     padding: 0.4rem 0.5rem;
   }
-  .rm:hover {
+  .profiles li :global(.rm:hover) {
     color: var(--danger);
     border-color: var(--border);
   }

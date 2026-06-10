@@ -16,10 +16,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api", default="http://localhost:4444")
     parser.add_argument("--title", default="dev playground")
-    parser.add_argument("--preset", default="default")
+    parser.add_argument(
+        "--generator",
+        default="default",
+        help="generator name within the uitest-clement profile (seeded from the"
+        " builtin templates at profile creation)",
+    )
     args = parser.parse_args()
 
     c = httpx.Client(base_url=args.api, timeout=60)
+
+    # ensure the seeding profile exists (creates one generator per builtin
+    # template), then pick the requested generator by name
+    c.put("/profiles/uitest-clement", json={"settings": {}}).raise_for_status()
+    generators = c.get("/generators", params={"profile": "uitest-clement"}).json()
+    by_name = [g for g in generators if g["name"] == args.generator]
+    assert by_name, (
+        f"no generator named {args.generator!r} in profile uitest-clement;"
+        f" available: {sorted(g['name'] for g in generators)}"
+    )
+    generator_id = by_name[0]["id"]
 
     def gen(weave_id: str, node_id: str, cursor: str, n: int = 3, **params):
         resp = c.post(
@@ -27,7 +43,7 @@ def main() -> None:
             json={
                 "node_id": node_id,
                 "cursor": cursor,
-                "preset": args.preset,
+                "generator_id": generator_id,
                 "params": {"n": n, **params},
             },
         )
@@ -62,7 +78,7 @@ def main() -> None:
     deep = c.post(
         f"/weaves/{wid}/gen",
         json={"node_id": grandkids[0]["id"], "cursor": "uitest-claude", "move_cursor": True,
-              "preset": args.preset, "params": {"n": 2}},
+              "generator_id": generator_id, "params": {"n": 2}},
     )
     deep.raise_for_status()
 

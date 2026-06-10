@@ -22,13 +22,25 @@ def client(tmp_path, fake_openai_url):
                 base_url=url, model="x", api_key_env="COLOOM_TEST_UNSET_KEY"
             ),
         },
-        presets={"default": Preset(endpoint="fake")},
+        presets={
+            "default": Preset(endpoint="fake"),
+            "dead": Preset(endpoint="dead"),
+            "keyless": Preset(endpoint="keyless"),
+        },
         default_preset="default",
     )
     store = WeaveStore(tmp_path / "server.sqlite")
     with TestClient(create_app(store, config)) as c:
         yield c
     store.close()
+
+
+def generator_for(client, name="default", profile="tester"):
+    """A seeded per-profile generator inheriting from the named builtin template
+    (every profile gets one per builtin at creation)."""
+    client.put(f"/profiles/{profile}", json={"settings": {}})
+    gens = client.get(f"/generators?profile={profile}").json()
+    return next(g for g in gens if g["name"] == name)
 
 
 def make_weave(client, **kwargs) -> str:
@@ -119,11 +131,13 @@ def test_split_bad_offset_is_400(client):
 
 def test_gen_creates_token_children(client, fake_openai_url):
     _, fake_app = fake_openai_url
+    gen = generator_for(client)
     wid = make_weave(client)
     root = add(client, wid, "The loom hummed softly as the weaver", move_cursor="agent")
 
     resp = client.post(
-        f"/weaves/{wid}/gen", json={"cursor": "agent", "move_cursor": True}
+        f"/weaves/{wid}/gen",
+        json={"cursor": "agent", "generator_id": gen["id"], "move_cursor": True},
     )
     assert resp.status_code == 201, resp.text
     nodes = resp.json()
@@ -148,9 +162,13 @@ def test_gen_without_node_or_cursor_is_400(client):
 
 
 def test_gen_with_missing_cursor_is_404(client):
+    gen = generator_for(client)
     wid = make_weave(client)
     add(client, wid, "x")
-    assert client.post(f"/weaves/{wid}/gen", json={"cursor": "ghost"}).status_code == 404
+    resp = client.post(
+        f"/weaves/{wid}/gen", json={"cursor": "ghost", "generator_id": gen["id"]}
+    )
+    assert resp.status_code == 404
 
 
 def test_gen_move_cursor_without_cursor_is_400(client):
@@ -162,13 +180,34 @@ def test_gen_move_cursor_without_cursor_is_400(client):
     assert resp.status_code == 400
 
 
-def test_gen_unknown_preset_is_400(client):
-    wid = make_weave(client)
-    root = add(client, wid, "x")
-    resp = client.post(
-        f"/weaves/{wid}/gen", json={"node_id": root["id"], "preset": "nope"}
+def test_load_env_file(tmp_path, monkeypatch):
+    """Server startup loads the repo-local .env (api_key_env endpoints resolve
+    from it); pre-existing environment variables always win."""
+    import os
+
+    from coloom.config import load_env_file
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "COLOOM_TEST_DOTENV_KEY=sk-from-file\n"
+        "COLOOM_TEST_DOTENV_EXISTING=file-value\n"
     )
-    assert resp.status_code == 400
+    monkeypatch.setenv("COLOOM_TEST_DOTENV_EXISTING", "env-wins")
+    try:
+        assert load_env_file(env) is True
+        assert os.environ["COLOOM_TEST_DOTENV_KEY"] == "sk-from-file"
+        assert os.environ["COLOOM_TEST_DOTENV_EXISTING"] == "env-wins"
+        assert load_env_file(tmp_path / "missing.env") is False
+    finally:
+        os.environ.pop("COLOOM_TEST_DOTENV_KEY", None)
+
+
+def test_setups_and_presets_endpoints_are_gone(client):
+    """The legacy two-layer setups API and the read-only presets API are
+    removed — yaml presets only exist as builtin templates now."""
+    assert client.get("/presets").status_code == 404
+    assert client.get("/setups").status_code == 404
+    assert client.post("/setups/models", json={}).status_code == 404
 
 
 def test_add_node_with_typed_content(client):
@@ -215,10 +254,13 @@ def test_update_weave(client):
 
 
 def test_gen_emits_presence_events(client):
+    gen = generator_for(client)
+    dead = generator_for(client, name="dead")
     wid = make_weave(client)
     root = add(client, wid, "x")
     resp = client.post(
-        f"/weaves/{wid}/gen", json={"node_id": root["id"], "cursor": "claude"}
+        f"/weaves/{wid}/gen",
+        json={"node_id": root["id"], "cursor": "claude", "generator_id": gen["id"]},
     )
     assert resp.status_code == 201
     events = client.get(f"/events?weave_id={wid}").json()["events"]
@@ -228,44 +270,46 @@ def test_gen_emits_presence_events(client):
     finished = next(e for e in events if e["type"] == "gen_finished")
     assert started["payload"]["requester"] == "claude"
     assert started["payload"]["node_id"] == root["id"]
+    assert started["payload"]["generator"] == "default"
     assert len(finished["payload"]["node_ids"]) == 2
     # failure path also closes the indicator
     client.post(
         f"/weaves/{wid}/gen",
-        json={"node_id": root["id"], "preset": "dead", "params": {"timeout": 2}},
+        json={
+            "node_id": root["id"],
+            "generator_id": dead["id"],
+            "params": {"timeout": 2},
+        },
     )
     events = client.get(f"/events?weave_id={wid}").json()["events"]
     errors = [e for e in events if e["type"] == "gen_finished" and "error" in e["payload"]]
     assert len(errors) == 1
-
-
-def test_list_presets(client):
-    resp = client.get("/presets")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["default_preset"] == "default"
-    # the "default" preset shadows nothing; raw endpoints are selectable too
-    assert set(body["presets"]) == {"default", "fake", "dead", "keyless"}
-    assert body["presets"]["default"]["model"] == "gpt-4-base"
-    assert body["presets"]["default"]["params"]["n"] == 2  # merged endpoint params
+    assert errors[0]["payload"]["generator"] == "dead"
 
 
 def test_gen_unreachable_endpoint_is_502(client):
+    dead = generator_for(client, name="dead")
     wid = make_weave(client)
     root = add(client, wid, "x")
     resp = client.post(
         f"/weaves/{wid}/gen",
-        json={"node_id": root["id"], "preset": "dead", "params": {"timeout": 2}},
+        json={
+            "node_id": root["id"],
+            "generator_id": dead["id"],
+            "params": {"timeout": 2},
+        },
     )
     assert resp.status_code == 502
     assert "failed" in resp.json()["detail"]
 
 
 def test_gen_missing_api_key_env_is_502(client):
+    keyless = generator_for(client, name="keyless")
     wid = make_weave(client)
     root = add(client, wid, "x")
     resp = client.post(
-        f"/weaves/{wid}/gen", json={"node_id": root["id"], "preset": "keyless"}
+        f"/weaves/{wid}/gen",
+        json={"node_id": root["id"], "generator_id": keyless["id"]},
     )
     assert resp.status_code == 502
     assert "COLOOM_TEST_UNSET_KEY" in resp.json()["detail"]
@@ -364,3 +408,112 @@ def test_client_header_becomes_event_origin(client):
     headerless = [e for e in later if e["type"] == "node_added"
                   and "origin" not in e["payload"]]
     assert len(headerless) == 1
+
+
+# ------------------------------------------------------- soft-delete / restore
+
+
+def test_soft_delete_response_shape_and_restore(client):
+    wid = make_weave(client)
+    root = add(client, wid, "r")
+    mid = add(client, wid, "m", parent=root["id"])
+    leaf = add(client, wid, "l", parent=mid["id"])
+    client.put(f"/weaves/{wid}/cursors/clem", json={"node_id": leaf["id"]})
+
+    resp = client.delete(f"/weaves/{wid}/nodes/{mid['id']}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body["deleted_node_ids"]) == {mid["id"], leaf["id"]}
+    assert body["deleted_node_ids"][0] == mid["id"]  # deletion root first
+    assert body["moved_cursors"] == [
+        {"name": "clem", "from": leaf["id"], "to": root["id"]}
+    ]
+    assert body["removed"] == body["deleted_node_ids"]  # legacy alias
+
+    # deleted nodes are invisible
+    assert client.get(f"/weaves/{wid}/nodes/{mid['id']}").status_code == 404
+    assert set(client.get(f"/weaves/{wid}").json()["nodes"]) == {root["id"]}
+    # delete on an already-deleted node → 404
+    assert client.delete(f"/weaves/{wid}/nodes/{mid['id']}").status_code == 404
+
+    resp = client.post(f"/weaves/{wid}/nodes/{mid['id']}/restore")
+    assert resp.status_code == 200
+    assert set(resp.json()["restored_node_ids"]) == {mid["id"], leaf["id"]}
+    weave = client.get(f"/weaves/{wid}").json()
+    assert set(weave["nodes"]) == {root["id"], mid["id"], leaf["id"]}
+    assert weave["nodes"][root["id"]]["children"] == [mid["id"]]
+    # restore does NOT move cursors back
+    assert weave["cursors"]["clem"]["node_id"] == root["id"]
+
+    # events: node_removed + node_restored both in the feed
+    events = client.get(f"/events?weave_id={wid}").json()["events"]
+    types = [e["type"] for e in events]
+    assert "node_removed" in types and "node_restored" in types
+    restored_ev = [e for e in events if e["type"] == "node_restored"][-1]
+    assert set(restored_ev["payload"]["node_ids"]) == {mid["id"], leaf["id"]}
+
+
+def test_restore_conflict_and_404(client):
+    wid = make_weave(client)
+    root = add(client, wid, "r")
+    resp = client.post(f"/weaves/{wid}/nodes/{root['id']}/restore")
+    assert resp.status_code == 409  # not deleted
+    assert client.post(f"/weaves/{wid}/nodes/nonexistent/restore").status_code == 404
+
+
+# ------------------------------------------------------------ global activity
+
+
+def test_global_activity_polling_spans_all_weaves(client):
+    """GET /events WITHOUT weave_id is the global activity feed: events from
+    every weave (each stamped with its weave_id), plus global-scope rows."""
+    since = client.get("/events").json()["cursor"]
+    wid_a = make_weave(client, title="A")
+    wid_b = make_weave(client, title="B")
+    add(client, wid_a, "in a")
+    add(client, wid_b, "in b")
+
+    events = client.get(f"/events?since={since}").json()["events"]
+    weave_ids = {e["weave_id"] for e in events if e["type"] == "node_added"}
+    assert weave_ids == {wid_a, wid_b}
+    # every event row carries its weave_id so a global feed can label it
+    assert all("weave_id" in e for e in events)
+
+
+def test_global_activity_websocket_unfiltered(client):
+    """/ws WITHOUT ?weave_id is the global live subscription: receives events
+    from every weave as they happen."""
+    wid_a = make_weave(client, title="A")
+    wid_b = make_weave(client, title="B")
+    with client.websocket_connect("/ws") as ws:
+        add(client, wid_a, "in a")
+        add(client, wid_b, "in b")
+        first = ws.receive_json()
+        second = ws.receive_json()
+        assert first["type"] == second["type"] == "node_added"
+        assert [first["weave_id"], second["weave_id"]] == [wid_a, wid_b]
+
+
+# ------------------------------------------------------------ static UI mount
+
+
+def test_static_dir_served_and_optional(tmp_path):
+    from coloom.config import ColoomConfig
+
+    static = tmp_path / "dist"
+    static.mkdir()
+    (static / "index.html").write_text("<html>coloom ui</html>")
+    store = WeaveStore(tmp_path / "static.sqlite")
+    with TestClient(create_app(store, ColoomConfig(), static_dir=static)) as c:
+        assert "coloom ui" in c.get("/").text
+        assert c.get("/weaves").status_code == 200  # API routes win over mount
+    store.close()
+
+    # missing dir → warning, API-only, no crash
+    store2 = WeaveStore(tmp_path / "nostatic.sqlite")
+    with TestClient(
+        create_app(store2, ColoomConfig(), static_dir=tmp_path / "missing")
+    ) as c:
+        assert c.get("/").status_code == 404
+        assert c.get("/weaves").status_code == 200
+    store2.close()

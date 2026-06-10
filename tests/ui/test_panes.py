@@ -198,6 +198,11 @@ def test_activity_feed_grows_live_with_claude_attribution(weave, page_as, api):
     expect(done_one).to_have_count(0)
 
     # uitest-claude generates (via API, at uitest-claude's own cursor) while uitest-clement watches
+    gen_id = next(  # /gen takes generator_id now (docs/generators-api.md)
+        g["id"]
+        for g in api.get("/generators?profile=uitest-clement").json()
+        if g["name"] == "default"
+    )
     errors: list[Exception] = []
 
     def gen_as_claude():
@@ -205,7 +210,8 @@ def test_activity_feed_grows_live_with_claude_attribution(weave, page_as, api):
             with httpx.Client(base_url=API, timeout=30) as c:
                 c.post(
                     f"/weaves/{weave}/gen",
-                    json={"cursor": "uitest-claude", "params": {"n": 1}},
+                    json={"cursor": "uitest-claude", "generator_id": gen_id,
+                          "params": {"n": 1}},
                 ).raise_for_status()
         except Exception as e:  # surfaced below; thread must not die silently
             errors.append(e)
@@ -283,13 +289,18 @@ def test_activity_hover_highlights_node_and_click_moves_no_cursor(weave, page_as
     entry = page.locator(".tab-body li", has_text="added a root").first
     expect(entry).to_be_visible()
 
-    # click: centers the view but must NOT move any cursor (read-only lens)
+    # click: EXPANDS the entry in place (round 5) — still a read-only lens,
+    # so no cursor may move; centering moved to the details' button
     cursors_before = get_cursors(api, weave)
     tf_before = canvas_transform(page)
     entry.locator("button.entry").click()
+    details = entry.locator('[data-testid^="activity-details-"]')
+    expect(details).to_be_visible()
+    # the expanded details' "center view on node" button centers the canvas
+    details.locator('[data-testid^="activity-center-"]').click()
     wait_until(
         lambda: canvas_transform(page) != tf_before,
-        "canvas should center on the entry's node after click",
+        "canvas should center on the entry's node via the details button",
     )
     page.wait_for_timeout(800)  # allow any (incorrect) cursor mutation to land
     assert get_cursors(api, weave) == cursors_before, (
@@ -434,9 +445,15 @@ def test_footer_stats_match_api_and_update_after_generation(weave, page_as, api)
     )
 
     # generate 2 nodes via the API -> footer updates live over WS
+    gen_id = next(  # /gen takes generator_id now (docs/generators-api.md)
+        g["id"]
+        for g in api.get("/generators?profile=uitest-clement").json()
+        if g["name"] == "default"
+    )
     api.post(
         f"/weaves/{weave}/gen",
-        json={"node_id": w["roots"][1], "cursor": "uitest-clement", "params": {"n": 2}},
+        json={"node_id": w["roots"][1], "cursor": "uitest-clement",
+              "generator_id": gen_id, "params": {"n": 2}},
     ).raise_for_status()
 
     expect(footer.locator("span").first).to_have_text(

@@ -560,7 +560,10 @@ def test_ctrl_enter_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, a
     )
 
 
-def test_delete_key_confirms_then_deletes_cursor_node(page_as, weave, api):
+def test_delete_key_deletes_cursor_node_no_confirm(page_as, weave, api):
+    """Delete asks NO confirmation (undo replaces it): the node goes straight
+    away, the cursor relocates to the parent (server-side), and a toast with
+    an "undo" button appears."""
     page = page_as("uitest-clement", weave)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -583,9 +586,10 @@ def test_delete_key_confirms_then_deletes_cursor_node(page_as, weave, api):
         timeout=4,
         desc="cursor node deleted",
     )
-    assert len(dialogs) == 1, f"expected one confirm dialog, got {dialogs}"
-    assert "Delete this node" in dialogs[0]
-    # cursor landed on the parent
+    assert dialogs == [], f"node delete must not open a native confirm: {dialogs}"
+    # the undo affordance replaces the confirmation
+    expect(page.get_by_test_id("toast-action")).to_have_text("undo")
+    # cursor landed on the parent (server relocates stranded cursors)
     poll(
         lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == branch,
         timeout=4,
@@ -621,20 +625,21 @@ def test_digit_toggles_generator_and_slash_focuses_search(page_as, weave, api):
     import re as _re
 
     page = page_as("uitest-clement", weave)
-    presets = api.get("/presets").json()
-    names = list(presets["presets"])  # no samplers in a fresh ctx → chips = presets
+    # fresh profile → chips = the seeded per-builtin-template generators
+    gens = api.get("/generators?profile=uitest-clement").json()
+    names = [g["name"] for g in gens]
     active = page.locator(".generators .chip.active")
-    expect(active).to_have_count(0)  # nothing active initially (fallback preset)
+    expect(active).to_have_count(0)  # nothing active initially (focused fallback)
 
     page.keyboard.press("2")
-    expect(page.get_by_test_id(f"gc-preset-{names[1]}")).to_have_class(
+    expect(page.get_by_test_id(f"gc-gen-{names[1]}")).to_have_class(
         _re.compile(r"\bactive\b")
     )
     page.keyboard.press("1")
     expect(active).to_have_count(2)  # several active at once
     page.keyboard.press("2")  # toggles OFF again
     expect(active).to_have_count(1)
-    expect(page.get_by_test_id(f"gc-preset-{names[0]}")).to_have_class(
+    expect(page.get_by_test_id(f"gc-gen-{names[0]}")).to_have_class(
         _re.compile(r"\bactive\b")
     )
 

@@ -124,7 +124,7 @@ def test_generation_in_a_appears_live_in_b(weave, page_as, api):
     weaving_before = feed.locator("li", has_text="is weaving at").count()
     done3_before = feed.locator("li", has_text="done: 3 branches at").count()
 
-    # A: generate at my cursor via the UI (default preset, n=3)
+    # A: generate at my cursor via the UI (focused-fallback = "default" generator, n=3)
     gen_btn = page_a.locator(".controls button.gen")
     expect(gen_btn).to_be_enabled()
     gen_btn.click()
@@ -133,7 +133,7 @@ def test_generation_in_a_appears_live_in_b(weave, page_as, api):
     cursor_node = get_cursors(api, weave)["uitest-clement"]["node_id"]
     wait_until(
         lambda: len(get_weave(api, weave)["nodes"]) == n0 + 3,
-        "generation should add 3 nodes (n=3 default preset)",
+        "generation should add 3 nodes (n=3 from the default generator)",
         deadline=8.0,
     )
     w = get_weave(api, weave)
@@ -221,8 +221,8 @@ def test_inflight_generation_shows_weaver_name_in_other_header(weave, page_as, a
     indicator_b = page_b.locator("header .inflight")
     expect(indicator_b).to_have_count(0)
 
-    # A: activate the 'fake-slow' preset chip (max_tokens=48) and generate
-    page_a.get_by_test_id("gc-preset-fake-slow").click()
+    # A: activate the 'fake-slow' generator chip (max_tokens=48) via its dot
+    page_a.get_by_test_id("gc-dot-fake-slow").click()
     page_a.locator(".controls button.gen").click()
 
     # B: indicator appears while in flight, names the weaver
@@ -375,9 +375,15 @@ def test_ws_reconnect_resyncs_missed_changes(weave, page_as, api):
     page_b.wait_for_timeout(500)
 
     # mutate while B is dark: 2 generated nodes
+    gen_id = next(  # /gen takes generator_id now (docs/generators-api.md)
+        g["id"]
+        for g in api.get("/generators?profile=uitest-clement").json()
+        if g["name"] == "default"
+    )
     api.post(
         f"/weaves/{weave}/gen",
-        json={"node_id": root1, "cursor": "uitest-clement", "params": {"n": 2}},
+        json={"node_id": root1, "cursor": "uitest-clement",
+              "generator_id": gen_id, "params": {"n": 2}},
     ).raise_for_status()
     wait_until(
         lambda: len(get_weave(api, weave)["nodes"]) == n0 + 2,

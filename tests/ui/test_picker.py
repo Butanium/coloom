@@ -90,3 +90,43 @@ def test_create_weave_into_folder(page_as, api, weave):
     finally:
         if w:
             _cleanup([w["id"]])
+
+
+def test_weave_delete_is_inline_two_step(page_as, api, weave):
+    """Weave delete never opens a native popup: the button ARMS on first click
+    ("sure?"), fires on the second, and disarms on blur without deleting."""
+    wid = _mkweave("doomed-weave")
+    try:
+        page = page_as("uitest-clement")
+        dialogs = []
+        page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+        btn = page.get_by_test_id(f"weave-delete-{wid}")
+        expect(btn).to_have_text("delete")
+
+        btn.click()  # first click only ARMS
+        expect(btn).to_have_text("sure?")
+        assert httpx.get(f"{API}/weaves/{wid}", timeout=5).status_code == 200, (
+            "arming must not delete"
+        )
+
+        # blur (focus something else) disarms without deleting
+        page.get_by_test_id("weave-filter").click()
+        expect(btn).to_have_text("delete")
+        assert httpx.get(f"{API}/weaves/{wid}", timeout=5).status_code == 200, (
+            "disarming must not delete"
+        )
+
+        btn.click()
+        btn.click()  # armed → fires
+        deadline = 4000
+        while deadline > 0:
+            if httpx.get(f"{API}/weaves/{wid}", timeout=5).status_code == 404:
+                break
+            page.wait_for_timeout(200)
+            deadline -= 200
+        assert httpx.get(f"{API}/weaves/{wid}", timeout=5).status_code == 404, (
+            "second click on the armed button did not delete the weave"
+        )
+        assert dialogs == [], f"native popup fired on weave delete: {dialogs}"
+    finally:
+        _cleanup([wid])

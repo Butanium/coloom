@@ -221,9 +221,10 @@ def test_bulk_collapse(weave, page_as, api):
     assert page.locator(f'g.card[data-node-id="{root1}"]').count() == 1
 
 
-def test_bulk_delete_cascades_with_confirm(weave, page_as, api):
-    """'delete all' confirms with the selection count + cascade warning, then
-    removes the selected nodes AND their subtrees server-side."""
+def test_bulk_delete_cascades_no_confirm_undo_toast(weave, page_as, api):
+    """'delete all' asks NO confirmation (undo replaces it): the selected
+    nodes AND their subtrees go straight away server-side, and ONE toast with
+    an "undo" button covers the whole batch."""
     page = page_as("uitest-clement", weave)
     w, root1, kids = seed_ids(api, weave)
     fit_weave(page)
@@ -241,9 +242,13 @@ def test_bulk_delete_cascades_with_confirm(weave, page_as, api):
         return all(nid not in nodes for nid in subtree)
 
     assert wait_until(page, gone), "bulk delete did not remove the subtree via REST"
-    assert len(dialogs) == 1, "delete all did not confirm"
-    assert "1 selected" in dialogs[0], f"confirm does not name the count: {dialogs[0]!r}"
-    assert "CASCADES" in dialogs[0], f"confirm does not warn about cascade: {dialogs[0]!r}"
+    assert dialogs == [], f"bulk delete must not open a native confirm: {dialogs}"
+    # one toast for the whole batch, naming the cascaded count, offering undo
+    assert wait_until(
+        page, lambda: page.get_by_test_id("toast-action").count() == 1, deadline_s=4
+    ), "expected exactly one undo toast for the whole bulk delete"
+    toast_text = page.locator(".toast", has=page.get_by_test_id("toast-action")).inner_text()
+    assert "3 nodes deleted" in toast_text, f"toast does not name the count: {toast_text!r}"
     # selection cleared after the delete -> bar gone
     assert wait_until(page, lambda: page.locator(".selbar").count() == 0, deadline_s=4), (
         "bulk bar still visible after deleting the whole selection"
