@@ -324,7 +324,13 @@ def test_delete_node_under_other_cursor_relocates_it(weave, page_as, api):
     assert doomed_text not in (doc_b.text_content() or "")
     # no crash: B still live and consistent
     expect(page_b.locator("header h1")).to_be_visible()
-    assert f"{n0 - 1} nodes" in footer_nodes(page_b)
+    # the thread check above can be satisfied by the local cursor patch alone,
+    # while the node_removed-driven refetch (which updates the footer count)
+    # is still in flight — so this is eventually-consistent, not immediate
+    wait_until(
+        lambda: f"{n0 - 1} nodes" in footer_nodes(page_b),
+        "B's footer node count should reflect the deletion after the refetch",
+    )
 
 
 # ============================================================ weave info sync

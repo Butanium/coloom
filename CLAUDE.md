@@ -11,8 +11,8 @@ branching** (click a top-logprob alternative → split + sibling branch), right-
 menu incl. the "summon <cursor> here" gesture, per-node gen-config inspection, presence
 ("X is weaving…") from `gen_started/finished` events, live multi-client WS sync. Built by a
 spec-extraction workflow (`docs/ui-specs/*.md`, exact behaviors from Tapestry-Loom source) +
-6 parallel component agents + 7 adversarial playwright testers. **Tests: 73 fast
-(`uv run pytest`) + 138 browser-interaction (`uv run pytest tests/ui`, opt-in, needs the dev
+6 parallel component agents + 7 adversarial playwright testers. **Tests: 81 fast
+(`uv run pytest`) + 140 browser-interaction (`uv run pytest tests/ui`, opt-in, needs the dev
 stack: `uv run coloom-fake-openai` + `uv run coloom-server` + `cd web && npm run dev`).**
 Automated tests use the **gpt-fake** mock (`src/coloom/fake_openai.py` — random tokens/logprobs,
 free); real gpt4-base stays for fun manual smokes. Seed a dev weave:
@@ -65,7 +65,19 @@ per-client), selection ring + floating bulk-action bar (`SelectionBar.svelte`: b
 / delete-with-cascade-confirm / clear), Escape clears; (6) activity tab hides plain cursor-move
 chatter — a move shows only when a real event follows it (summons always show); (7) test
 identities renamed `uitest-*`, dev/test weaves live in the picker's `testing` folder (seed
-script targets it); "keys" button renamed "keybindings".
+script targets it); "keys" button renamed "keybindings"; (8) generate defaults are
+**Ctrl+Enter / Ctrl+Shift+Enter** (gen / gen+follow), and bound combos with a non-shift
+modifier dispatch even from editable targets; (9) **profile deletion is soft** — DELETE marks
+`active=0` (hidden from the gate), logging in with the same name resurrects all settings
+(motivated by a real same-night loss: gate-deleting a duplicate profile ate its config);
+(10) **event origin mechanism** — every mutating request carries a per-tab `X-Coloom-Client`
+id, stamped into event `payload.origin`, so clients absorb their *own* echoes generically
+(replaces the ad-hoc pending-echo counter; origin-skipping applies only to optimistically
+applied features, currently cursors); (11) **free-form edit serialization** — the
+double-append bug was a stale diff baseline (edit 2 diffed against a thread not yet containing
+edit 1): `applyEdit` now waits for the live thread to provably contain the previous edit
+before re-diffing, doc render stays frozen across the whole sync window, with a prefix-match +
+4s timeout escape for concurrent remote edits.
 
 ## Layout
 - `src/coloom/models.py` — pydantic weave model (Node, Snippet/Tokens, Creator attribution, Cursor)
