@@ -23,7 +23,10 @@ def main() -> None:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1500, "height": 900})
         page.add_init_script(
-            f"localStorage.setItem('coloom.identity', {args.identity!r})"
+            # both keys: identity for attribution, profile so autoLogin skips
+            # the gate (without it every shot is the login page)
+            f"localStorage.setItem('coloom.identity', {args.identity!r});"
+            f"localStorage.setItem('coloom.profile', {args.identity!r})"
         )
         page.goto(f"{args.base}/#/", wait_until="networkidle")
         page.wait_for_timeout(500)
