@@ -1,45 +1,49 @@
 <script lang="ts">
-  interface WeaveSummary {
-    id: string
-    title: string
-    description: string
-    created: string
-  }
+  import Editor from './lib/Editor.svelte'
+  import Login from './lib/Login.svelte'
+  import Picker from './lib/Picker.svelte'
+  import Toasts from './lib/Toasts.svelte'
+  import { autoLogin, profile } from './lib/profile.svelte'
+  import { setIdentity } from './lib/state.svelte'
 
-  async function fetchWeaves(): Promise<WeaveSummary[]> {
-    const res = await fetch('/weaves')
-    if (!res.ok) throw new Error(`GET /weaves failed: ${res.status}`)
-    return res.json()
-  }
+  // hash routing: '' → picker, '#/w/<id>' → editor — all behind the profile gate
+  let hash = $state(location.hash)
+  $effect(() => {
+    const onHash = () => (hash = location.hash)
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  })
+
+  const weaveId = $derived(hash.match(/^#\/w\/([0-9a-f]+)$/)?.[1] ?? null)
+
+  // auto-login from the cached profile name, once
+  $effect(() => {
+    void autoLogin()
+  })
+
+  // the identity (cursor name, creator attribution) IS the profile name
+  $effect(() => {
+    if (profile.name) setIdentity(profile.name)
+  })
 </script>
 
-<main>
-  <h1>coloom</h1>
-  <p>a loom for human + AI co-weaving</p>
-  {#await fetchWeaves()}
-    <p>loading weaves…</p>
-  {:then weaves}
-    {#if weaves.length === 0}
-      <p>no weaves yet</p>
-    {:else}
-      <ul>
-        {#each weaves as w (w.id)}
-          <li><code>{w.id}</code> {w.title}</li>
-        {/each}
-      </ul>
-    {/if}
-  {:catch err}
-    <p class="error">server unreachable: {err.message}</p>
-  {/await}
-</main>
+{#if profile.pending}
+  <div class="center-msg"><p>loading profile…</p></div>
+{:else if profile.name === null}
+  <Login />
+{:else if weaveId}
+  <Editor {weaveId} />
+{:else}
+  <Picker />
+{/if}
+<Toasts />
 
 <style>
-  main {
-    max-width: 48rem;
-    margin: 2rem auto;
-    padding: 0 1rem;
-  }
-  .error {
-    color: #c0392b;
+  .center-msg {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
   }
 </style>

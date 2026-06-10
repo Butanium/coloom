@@ -1,13 +1,83 @@
 :root {
   font-family: system-ui, -apple-system, sans-serif;
   line-height: 1.5;
-  color-scheme: light dark;
+  color-scheme: dark;
+
+  --bg: #16161c;
+  --bg-raised: #1e1e26;
+  --bg-card: #232330;
+  --border: #34343f;
+  --text: #d8d8e0;
+  --text-dim: #8a8a96;
+  --accent: #e8a33d;
+  --danger: #e0604f;
+  --mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
+
+  /* type scale — keep text comfortably readable; never go below --fs-tiny.
+     --fs-doc is the thread reading surface, the thing we stare at most.
+     Calibrated against Tapestry-Loom's editor side-by-side (2026-06-10):
+     the previous 17px/14px round was still visibly smaller than Tapestry. */
+  --fs-doc: 1.2rem; /* ~19px */
+  --fs-ui: 1rem; /* 16px: controls, lists, menus, tooltips */
+  --fs-small: 0.9rem; /* ~14px: metadata, status bar, secondary labels */
+  --fs-tiny: 0.85rem; /* ~13.5px floor: densest annotations only */
+
+  background: var(--bg);
+  color: var(--text);
 }
 
 body {
   margin: 0;
 }
 
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
 code {
-  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
+  font-family: var(--mono);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--text-dim);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1208;
+  font-weight: 600;
+}
+
+button.danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
 }
