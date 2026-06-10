@@ -87,15 +87,35 @@ def assert_no_generation(page, api, wid, key: str):
 # ---------------------------------------------------------------- tests
 
 
-def test_default_g_generates(page_as, weave, api):
+def test_default_ctrl_enter_generates(page_as, weave, api):
     page = page_as("uitest-clement", weave)
     cur = cursor_node(api, weave)
     before = list(children_of(api, weave, cur))
-    page.keyboard.press("g")
+    page.keyboard.press("Control+Enter")
     poll(
         lambda: len(children_of(api, weave, cur)) > len(before),
-        desc="default 'g' generated children at cursor",
+        desc="default Ctrl+Enter generated children at cursor",
     )
+
+
+def test_ctrl_enter_generates_while_typing_in_doc(page_as, weave, api):
+    """Modified combos dispatch even from text entry: Ctrl+Enter generates
+    with the caret inside the contenteditable doc (Tapestry UX)."""
+    page = page_as("uitest-clement", weave)
+    page.locator(".doc").click()  # focus the editable thread document
+    page.keyboard.press("End")
+    gens0 = gen_count(api, weave)
+    page.keyboard.press("Control+Enter")
+    poll(
+        lambda: gen_count(api, weave) > gens0,
+        desc="Ctrl+Enter generated from inside the doc",
+    )
+    # the bare-key rule is untouched: plain Enter stayed a text edit (no gen)
+    page.wait_for_timeout(1500)
+    gens1 = gen_count(api, weave)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(2000)
+    assert gen_count(api, weave) == gens1, "plain Enter in the doc fired generate"
 
 
 def test_rebind_generate_to_ctrl_space(page_as, weave, api):
@@ -113,8 +133,8 @@ def test_rebind_generate_to_ctrl_space(page_as, weave, api):
     poll(lambda: gen_count(api, weave) > gens0, desc="Ctrl+Space generation started")
     page.wait_for_timeout(1500)  # let the burst finish
 
-    # …and the old key is fully detached
-    assert_no_generation(page, api, weave, "g")
+    # …and the old default combo is fully detached
+    assert_no_generation(page, api, weave, "Control+Enter")
 
 
 def test_keys_during_capture_do_not_dispatch(page_as, weave, api):
@@ -170,12 +190,17 @@ def test_reset_all_restores_defaults(page_as, weave, api):
         "Ctrl+Space"
     )
     page.get_by_test_id("kb-reset").click()
-    expect(page.get_by_test_id("kb-binding-generate_at_cursor")).to_have_text("G")
+    expect(page.get_by_test_id("kb-binding-generate_at_cursor")).to_have_text(
+        "Ctrl+Enter"
+    )
     close_dialog(page)
 
     gens0 = gen_count(api, weave)
-    page.keyboard.press("g")
-    poll(lambda: gen_count(api, weave) > gens0, desc="'g' generates again after reset")
+    page.keyboard.press("Control+Enter")
+    poll(
+        lambda: gen_count(api, weave) > gens0,
+        desc="Ctrl+Enter generates again after reset",
+    )
 
 
 def test_rebind_persists_across_reload(page_as, weave, api):
@@ -200,4 +225,4 @@ def test_rebind_persists_across_reload(page_as, weave, api):
         desc="rebound combo still generates after reload",
     )
     page.wait_for_timeout(1500)
-    assert_no_generation(page, api, weave, "g")
+    assert_no_generation(page, api, weave, "Control+Enter")

@@ -525,24 +525,25 @@ def test_alt_arrow_navigates_even_from_the_text_pane(page_as, weave, api):
     )
 
 
-def test_g_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, api):
+def test_ctrl_enter_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, api):
     page = page_as("uitest-clement", weave)
     w = weave_json(api, weave)
     cursor_node = get_cursors(api, weave)["uitest-clement"]["node_id"]
     children_before = list(w["nodes"][cursor_node]["children"])
     assert w["nodes"][cursor_node]["bookmarked"] is True  # seeded bookmark
 
-    page.keyboard.press("g")
+    page.keyboard.press("Control+Enter")
     poll(
         lambda: len(weave_json(api, weave)["nodes"][cursor_node]["children"])
         > len(children_before),
-        desc="g generated children at cursor",
+        desc="Ctrl+Enter generated children at cursor",
     )
     page.wait_for_timeout(1500)
     w2 = weave_json(api, weave)
     new = [c for c in w2["nodes"][cursor_node]["children"] if c not in children_before]
     assert len(new) == 3  # default preset n=3
-    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == cursor_node  # plain g: no follow
+    # plain generate: no follow
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == cursor_node
 
     page.keyboard.press("b")
     poll(

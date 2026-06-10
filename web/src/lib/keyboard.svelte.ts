@@ -183,8 +183,11 @@ function handleKeydown(e: KeyboardEvent) {
     if (navigate(ALT_NAV[e.key])) e.preventDefault()
     return
   }
-  // never steal keys from text entry
-  if (isEditableTarget(e.target)) return
+  // combos carrying a non-shift modifier (ctrl/alt/meta) dispatch even from
+  // text entry (Tapestry UX: Ctrl+Enter generates while typing in the doc);
+  // bare keys and shift-only combos never steal from text entry. Exact-match
+  // dispatch below guarantees only modified bindings can fire on these events.
+  if (isEditableTarget(e.target) && !e.ctrlKey && !e.altKey && !e.metaKey) return
 
   if (e.key === 'Escape') {
     closeContextMenu()
