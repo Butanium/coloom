@@ -143,7 +143,7 @@ export const api = {
   // profiles: server-stored per-person client settings (roam across browsers)
   listProfiles: () => request<{ name: string; updated: string }[]>('GET', '/profiles'),
   getProfile: (name: string) =>
-    request<{ name: string; settings: Record<string, unknown> }>(
+    request<{ name: string; settings: Record<string, unknown>; active?: boolean }>(
       'GET',
       `/profiles/${encodeURIComponent(name)}`,
     ),

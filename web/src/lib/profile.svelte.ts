@@ -78,7 +78,11 @@ export async function loginProfile(name: string): Promise<void> {
   try {
     let settings: Record<string, unknown>
     try {
-      settings = (await api.getProfile(trimmed)).settings
+      const p = await api.getProfile(trimmed)
+      settings = p.settings
+      // deletion is soft (hidden from the list, settings kept): logging in
+      // with the name again resurrects the profile with everything intact
+      if (p.active === false) settings = (await api.putProfile(trimmed, settings)).settings
     } catch (e) {
       if (!(e instanceof ApiError && e.status === 404)) throw e
       // first login = create the profile

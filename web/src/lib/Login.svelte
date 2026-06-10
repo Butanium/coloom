@@ -35,7 +35,13 @@
 
   async function remove(name: string, e: Event) {
     e.stopPropagation()
-    if (!confirm(`delete profile "${name}"? its settings are gone for good`)) return
+    if (
+      !confirm(
+        `remove profile "${name}" from this list? its settings are kept — ` +
+          `logging in with the same name brings everything back`,
+      )
+    )
+      return
     await withToast(async () => {
       await api.deleteProfile(name)
       await refresh()

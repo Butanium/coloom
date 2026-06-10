@@ -43,11 +43,59 @@ def test_profile_upsert_replaces_settings(client):
     assert len(client.get("/profiles").json()) == 1
 
 
-def test_profile_delete_and_404(client):
-    client.put("/profiles/gone", json={"settings": {}})
+def test_profile_delete_is_soft_and_resurrectable(client):
+    """DELETE hides the profile from the list but keeps its settings; logging
+    in with the same name (PUT) brings everything back."""
+    client.put("/profiles/gone", json={"settings": {"keep": "me"}})
     assert client.delete("/profiles/gone").status_code == 204
-    assert client.get("/profiles/gone").status_code == 404
-    assert client.delete("/profiles/gone").status_code == 404
+
+    # hidden from the gate's list…
+    assert [p["name"] for p in client.get("/profiles").json()] == []
+    # …but the row (and settings) survive, flagged inactive
+    got = client.get("/profiles/gone")
+    assert got.status_code == 200
+    assert got.json()["active"] is False
+    assert got.json()["settings"] == {"keep": "me"}
+    # deleting again is still fine (idempotent on a soft-deleted row)
+    assert client.delete("/profiles/gone").status_code == 204
+
+    # resurrection: a PUT (what login does for an inactive profile) reactivates
+    client.put("/profiles/gone", json={"settings": {"keep": "me"}})
+    assert [p["name"] for p in client.get("/profiles").json()] == ["gone"]
+    assert client.get("/profiles/gone").json()["active"] is True
+
+    # a never-created name still 404s
+    assert client.get("/profiles/never-existed").status_code == 404
+    assert client.delete("/profiles/never-existed").status_code == 404
+
+
+def test_profiles_table_migrates_active_column(tmp_path):
+    """A database created before the soft-delete column existed gets the
+    `active` column added on open, with existing rows defaulting to active."""
+    import sqlite3
+
+    db = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE profiles ("
+        " name TEXT PRIMARY KEY, settings TEXT NOT NULL DEFAULT '{}',"
+        " created TEXT NOT NULL, updated TEXT NOT NULL);"
+        "INSERT INTO profiles VALUES ('veteran', '{\"old\": true}', 't0', 't0');"
+    )
+    conn.commit()
+    conn.close()
+
+    store = WeaveStore(db)
+    try:
+        assert [p["name"] for p in store.list_profiles()] == ["veteran"]
+        got = store.get_profile("veteran")
+        assert got["active"] is True
+        assert got["settings"] == {"old": True}
+        store.delete_profile("veteran")
+        assert store.list_profiles() == []
+        assert store.get_profile("veteran")["active"] is False
+    finally:
+        store.close()
 
 
 def test_profile_listing_sorted_and_independent(client):

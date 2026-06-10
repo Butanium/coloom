@@ -102,9 +102,18 @@ CREATE TABLE IF NOT EXISTS profiles (
     name     TEXT PRIMARY KEY,
     settings TEXT NOT NULL DEFAULT '{}',
     created  TEXT NOT NULL,
-    updated  TEXT NOT NULL
+    updated  TEXT NOT NULL,
+    active   INTEGER NOT NULL DEFAULT 1
 );
 """
+
+# Additive column migrations for databases created before the column existed.
+# (CREATE TABLE IF NOT EXISTS won't touch an existing table.)
+_MIGRATIONS: list[tuple[str, str, str]] = [
+    # (table, column, ALTER statement)
+    ("profiles", "active",
+     "ALTER TABLE profiles ADD COLUMN active INTEGER NOT NULL DEFAULT 1"),
+]
 
 
 class WeaveStoreError(Exception):
@@ -137,6 +146,13 @@ class WeaveStore:
         self._lock = threading.RLock()
         with self._tx():
             self._conn.executescript(_SCHEMA)
+            for table, column, alter in _MIGRATIONS:
+                cols = {
+                    r["name"]
+                    for r in self._conn.execute(f"PRAGMA table_info({table})")
+                }
+                if column not in cols:
+                    self._conn.execute(alter)
 
     def close(self) -> None:
         self._conn.close()
@@ -800,14 +816,18 @@ class WeaveStore:
     # generators…) so a profile roams across browsers. Opaque JSON blob.
 
     def list_profiles(self) -> list[dict[str, Any]]:
+        """Active profiles only — soft-deleted ones are hidden, not gone."""
         rows = self._conn.execute(
-            "SELECT name, updated FROM profiles ORDER BY name"
+            "SELECT name, updated FROM profiles WHERE active = 1 ORDER BY name"
         ).fetchall()
         return [{"name": r["name"], "updated": r["updated"]} for r in rows]
 
     def get_profile(self, name: str) -> dict[str, Any]:
+        """Returns soft-deleted profiles too (with active=False): logging in
+        with the same name again must find the old settings, never lose them."""
         row = self._conn.execute(
-            "SELECT name, settings, created, updated FROM profiles WHERE name = ?",
+            "SELECT name, settings, created, updated, active FROM profiles"
+            " WHERE name = ?",
             (name,),
         ).fetchone()
         if row is None:
@@ -817,30 +837,42 @@ class WeaveStore:
             "settings": json.loads(row["settings"]),
             "created": row["created"],
             "updated": row["updated"],
+            "active": bool(row["active"]),
         }
 
     def put_profile(self, name: str, settings: dict[str, Any]) -> dict[str, Any]:
+        """Create or update; also resurrects a soft-deleted profile."""
         now = utcnow().isoformat()
         with self._tx() as c:
             c.execute(
-                "INSERT INTO profiles (name, settings, created, updated)"
-                " VALUES (?, ?, ?, ?)"
+                "INSERT INTO profiles (name, settings, created, updated, active)"
+                " VALUES (?, ?, ?, ?, 1)"
                 " ON CONFLICT (name) DO UPDATE"
-                " SET settings = excluded.settings, updated = excluded.updated",
+                " SET settings = excluded.settings, updated = excluded.updated,"
+                "     active = 1",
                 (name, json.dumps(settings), now, now),
             )
         return self.get_profile(name)
 
     def delete_profile(self, name: str) -> None:
+        """Soft delete: mark inactive (hidden from the list) but keep the row —
+        profile settings are never destroyed."""
+        now = utcnow().isoformat()
         with self._tx() as c:
             self.get_profile(name)
-            c.execute("DELETE FROM profiles WHERE name = ?", (name,))
+            c.execute(
+                "UPDATE profiles SET active = 0, updated = ? WHERE name = ?",
+                (now, name),
+            )
 
     # ------------------------------------------------------------ events
 
     def _log_event(
         self, c: sqlite3.Connection, weave_id: str, type_: str, payload: dict[str, Any]
     ) -> int:
+        origin = current_origin.get()
+        if origin is not None:
+            payload = {**payload, "origin": origin}
         cur = c.execute(
             "INSERT INTO events (weave_id, type, payload, created) VALUES (?, ?, ?, ?)",
             (weave_id, type_, json.dumps(payload), utcnow().isoformat()),

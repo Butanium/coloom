@@ -92,9 +92,13 @@ def test_switch_profile_returns_to_gate(browser, api, weave):
         httpx.delete(f"{API}/profiles/{name}", timeout=5)
 
 
-def test_delete_profile_from_gate(browser, api, weave):
+def test_delete_profile_from_gate_is_soft(browser, api, weave):
+    """Deleting from the gate hides the profile but keeps its settings on the
+    server (soft delete), and logging in with the same name resurrects it."""
     name = "ui-test-deletee"
-    httpx.put(f"{API}/profiles/{name}", json={"settings": {}}, timeout=5)
+    httpx.put(
+        f"{API}/profiles/{name}", json={"settings": {"precious": True}}, timeout=5
+    )
     ctx, page = _fresh_ctx(browser)
     try:
         page.goto(f"{BASE}/#/", wait_until="networkidle")
@@ -103,7 +107,21 @@ def test_delete_profile_from_gate(browser, api, weave):
         page.on("dialog", lambda d: d.accept())
         page.get_by_test_id(f"profile-delete-{name}").click()
         expect(page.get_by_test_id(f"profile-{name}")).to_have_count(0)
-        assert httpx.get(f"{API}/profiles/{name}", timeout=5).status_code == 404
+
+        # server-side: hidden from the list, but the settings survive
+        r = httpx.get(f"{API}/profiles/{name}", timeout=5)
+        assert r.status_code == 200 and r.json()["active"] is False
+        assert r.json()["settings"] == {"precious": True}
+
+        # resurrection through the gate: create/login with the same name
+        page.get_by_test_id("new-profile-name").fill(name)
+        page.get_by_test_id("new-profile-create").click()
+        expect(page.locator("h1")).to_have_text("coloom")
+        r = httpx.get(f"{API}/profiles/{name}", timeout=5)
+        assert r.json()["active"] is True, "login should reactivate the profile"
+        assert r.json()["settings"] == {"precious": True}, (
+            "resurrected profile must keep its pre-deletion settings"
+        )
     finally:
         ctx.close()
         httpx.delete(f"{API}/profiles/{name}", timeout=5)
