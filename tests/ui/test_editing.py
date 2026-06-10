@@ -27,13 +27,13 @@ DEADLINE_S = 8.0
 # ---------------------------------------------------------------- helpers
 
 
-def get_thread(api, weave_id, cursor="clement"):
+def get_thread(api, weave_id, cursor="uitest-clement"):
     r = api.get(f"/weaves/{weave_id}/cursors/{cursor}/thread")
     r.raise_for_status()
     return r.json()
 
 
-def get_cursor(api, weave_id, name="clement"):
+def get_cursor(api, weave_id, name="uitest-clement"):
     r = api.get(f"/weaves/{weave_id}/cursors")
     r.raise_for_status()
     return r.json()[name]
@@ -50,7 +50,7 @@ def node_text(node):
     return c["text"] if c["type"] == "snippet" else "".join(t["text"] for t in c["tokens"])
 
 
-def add_node(api, weave_id, text=None, *, content=None, parent, creator_label="clement",
+def add_node(api, weave_id, text=None, *, content=None, parent, creator_label="uitest-clement",
              move_cursor=True):
     body = {
         "parent_id": parent,
@@ -67,7 +67,7 @@ def add_node(api, weave_id, text=None, *, content=None, parent, creator_label="c
     return r.json()
 
 
-def set_cursor(api, weave_id, node_id, name="clement"):
+def set_cursor(api, weave_id, node_id, name="uitest-clement"):
     r = api.put(f"/weaves/{weave_id}/cursors/{name}", json={"node_id": node_id, "moved_by": name})
     r.raise_for_status()
 
@@ -166,7 +166,7 @@ def test_blank_weave_typing_creates_root_then_coalesces(blank_weave, page_as, ap
     """Typing into a completely empty weave creates ONE root snippet node (human,
     my label, my cursor moved onto it); continued typing coalesces into that SAME
     node — no chain of one-batch nodes, no duplicated text in the doc."""
-    page = page_as("clement", blank_weave)
+    page = page_as("uitest-clement", blank_weave)
     errors = collect_pageerrors(page)
     assert get_weave(api, blank_weave)["nodes"] == {}, "blank weave is not blank"
 
@@ -182,7 +182,7 @@ def test_blank_weave_typing_creates_root_then_coalesces(blank_weave, page_as, ap
     ((nid, node),) = after["nodes"].items()
     assert node["content"] == {"type": "snippet", "text": "Once upon"}
     assert node["creator"]["type"] == "human"
-    assert node["creator"]["label"] == "clement"
+    assert node["creator"]["label"] == "uitest-clement"
     assert node["parents"] == [], "root node must have no parents"
     assert after["roots"] == [nid]
     assert get_cursor(api, blank_weave)["node_id"] == nid, "cursor not moved to the root"
@@ -215,7 +215,7 @@ def test_append_typing_coalesces_into_one_growing_human_node(weave, page_as, api
     """Typing at the thread end: the first append (leaf is a MODEL node) creates a
     new human snippet node; subsequent typing into that same human leaf COALESCES
     (updateNode grows the one node, no chain of one-keystroke nodes)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     before = get_weave(api, weave)
     n_before = len(before["nodes"])
@@ -261,7 +261,7 @@ def test_mid_node_edit_of_model_tokens_makes_hybrid_sibling(weave, page_as, api)
     intact (head + tail = original), a NEW hybrid sibling appears under the head
     with model attribution + edited_by metadata, a logprob-null middle token, and
     inexact-flagged preserved suffix tokens. Cursor moves to the hybrid."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
     tok_idx_in_path, tok_node = tokens_node_of_thread(thread)
@@ -310,7 +310,7 @@ def test_mid_node_edit_of_model_tokens_makes_hybrid_sibling(weave, page_as, api)
         after["nodes"][c]
         for c in head["children"]
         if c in fresh
-        and after["nodes"][c]["metadata"].get("edited_by") == "clement"
+        and after["nodes"][c]["metadata"].get("edited_by") == "uitest-clement"
     ]
     assert len(hybrids) == 1, f"hybrid edited node not found under head; errors={errors}"
     hybrid = hybrids[0]
@@ -348,10 +348,10 @@ def test_mid_thread_edit_copies_downstream_node_with_provenance(weave, page_as, 
     re-created on the new branch as a copy (creator preserved, copied_from
     provenance, tokens flagged inexact), and the cursor lands on the deepest copy.
     The original chain remains untouched as a sibling."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
-    # clement's thread is [human-root-snippet, model-tokens]. Build a downstream
+    # uitest-clement's thread is [human-root-snippet, model-tokens]. Build a downstream
     # node so the EDITED node (the root snippet) has a thread node after it.
     root = thread["nodes"][0]
     _, tok_node = tokens_node_of_thread(thread)
@@ -416,7 +416,7 @@ def test_mid_thread_edit_copies_downstream_node_with_provenance(weave, page_as, 
 def test_tail_deletion_moves_cursor_without_deleting(weave, page_as, api):
     """Deleting from the end of the doc never deletes a node: it splits at the new
     end (if mid-node) and moves the cursor up; downstream survives as a branch."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
@@ -464,7 +464,7 @@ def test_tail_deletion_moves_cursor_without_deleting(weave, page_as, api):
 def test_caret_survives_a_rerender_after_edit(weave, page_as, api):
     """After an edit applies and the WS refetch rebuilds spans, the caret is
     restored to its character offset (not lost / not jumped to the end)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     before = get_weave(api, weave)
 
@@ -503,7 +503,7 @@ def test_emoji_snippet_edit_is_codepoint_correct(weave, page_as, api):
     """A snippet split must use Python CODE-POINT offsets (an emoji is 2 UTF-16
     units, 1 code point). Edit just before an emoji and verify the split halves
     keep the emoji intact (no torn surrogate)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
@@ -564,7 +564,7 @@ def test_multiline_insert_preserves_newlines(weave, page_as, api):
     '\\n', silently dropping the paragraph breaks. applyEdit must reconstruct them
     (docInnerText). Drives execCommand insertText with embedded newlines — exactly
     what a plaintext paste lands as in Chromium."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     before = get_weave(api, weave)
     n_before = len(before["nodes"])

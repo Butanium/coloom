@@ -30,13 +30,13 @@ GEN_DEADLINE_S = 8.0  # fake-backend generation + refetch
 # ---------------------------------------------------------------- helpers
 
 
-def get_thread(api, weave_id, cursor="clement"):
+def get_thread(api, weave_id, cursor="uitest-clement"):
     r = api.get(f"/weaves/{weave_id}/cursors/{cursor}/thread")
     r.raise_for_status()
     return r.json()
 
 
-def get_cursor(api, weave_id, name="clement"):
+def get_cursor(api, weave_id, name="uitest-clement"):
     r = api.get(f"/weaves/{weave_id}/cursors")
     r.raise_for_status()
     return r.json()[name]
@@ -59,11 +59,11 @@ def wait_until(page, predicate, deadline_s=GEN_DEADLINE_S, interval_ms=250):
 
 
 def tokens_node_of_thread(thread):
-    """The (single) tokens node on clement's seeded thread, plus its path index."""
+    """The (single) tokens node on uitest-clement's seeded thread, plus its path index."""
     for i, node in enumerate(thread["nodes"]):
         if node["content"]["type"] == "tokens":
             return i, node
-    raise AssertionError("seeded clement thread has no tokens node")
+    raise AssertionError("seeded uitest-clement thread has no tokens node")
 
 
 def node_text(node):
@@ -120,7 +120,7 @@ def blank_weave(api):
 
 def test_doc_shows_my_cursor_thread(weave, page_as, api):
     """The doc is exactly my cursor's root->cursor thread concatenation."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     thread = get_thread(api, weave)
     doc = page.locator(".side-pane .doc")
     assert doc.count() == 1, "thread doc not rendered"
@@ -139,9 +139,9 @@ def test_doc_shows_my_cursor_thread(weave, page_as, api):
 
 def test_boundary_ticks_on_multinode_thread(weave, page_as, api):
     """Thread with >=2 nodes renders the attribution-boundary tick on every node."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     thread = get_thread(api, weave)
-    assert len(thread["path"]) >= 2, "seeded clement thread should be >= 2 nodes"
+    assert len(thread["path"]) >= 2, "seeded uitest-clement thread should be >= 2 nodes"
     spans = page.locator(".doc [data-node-id]")
     boundary = page.locator(".doc [data-node-id].boundary")
     assert boundary.count() == spans.count() >= 2
@@ -153,7 +153,7 @@ def test_boundary_ticks_on_multinode_thread(weave, page_as, api):
 def test_token_tooltip_content_and_hover_persistence(weave, page_as, api):
     """Hover a token -> tooltip with probability % + counterfactual buttons;
     moving the pointer into the tooltip keeps it open past the hide delay."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
     tip = hover_token(page, 5)
@@ -183,7 +183,7 @@ def test_token_tooltip_content_and_hover_persistence(weave, page_as, api):
 def test_snippet_node_tooltip(weave, page_as, api):
     """Hover a snippet node -> NodeTooltip with creator label/type + timestamp.
     (Seeded snippets are human-authored, so no genParams block is expected.)"""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     thread = get_thread(api, weave)
     root = thread["nodes"][0]
     assert root["content"]["type"] == "snippet" and root["creator"]["type"] == "human"
@@ -194,7 +194,7 @@ def test_snippet_node_tooltip(weave, page_as, api):
     tip = page.locator("[role=tooltip]")
     assert tip.count() == 1, "node tooltip did not appear over the snippet node"
     text = tip.inner_text()
-    assert root["creator"]["label"] in text  # creator label ("clement")
+    assert root["creator"]["label"] in text  # creator label ("uitest-clement")
     assert "(human)" in text  # creator type
     assert "created" in text  # timestamp line
     assert root["id"][:8] in text  # node id stamp
@@ -207,7 +207,7 @@ def test_counterfactual_click_branches_and_moves_cursor(weave, page_as, api):
     """Click a NON-chosen alternative in the token tooltip -> the node is split at
     that token, a new Tokens sibling starting with the alternative appears (model
     attribution preserved), and my cursor moves to it."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
@@ -279,7 +279,7 @@ def test_counterfactual_click_branches_and_moves_cursor(weave, page_as, api):
 def test_single_click_shows_caret_without_moving_cursor(weave, page_as, api):
     """Single click in the text -> caret bar (generate-here affordance) appears;
     the API cursor must NOT move."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cur_before = get_cursor(api, weave)
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
@@ -301,7 +301,7 @@ def test_double_click_selects_word_not_moves_cursor(weave, page_as, api):
     """The doc is now a free-form contenteditable: double-click does NATIVE word
     selection (drop of the old double-click-moves-cursor gesture). The API cursor
     must NOT move; the tree "move my cursor here" gesture handles that now."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cur_before = get_cursor(api, weave)
     thread = get_thread(api, weave)
     root = thread["nodes"][0]
@@ -321,7 +321,7 @@ def test_generate_at_caret_splits_and_generates(weave, page_as, api):
     """Click mid-token-node, then 'generate here' -> the node is split at the
     caret's token boundary, new children are generated on the head, and my
     cursor moves to a generated node."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
@@ -377,7 +377,7 @@ def test_generate_at_caret_splits_and_generates(weave, page_as, api):
 def test_typing_at_doc_end_appends_and_follows_cursor(weave, page_as, api):
     """The legacy composer is GONE: typing at the end of the doc IS the append
     path. A new human node lands at my cursor and my cursor follows it."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     assert page.locator(".composer").count() == 0, "legacy append composer still rendered"
     cur_before = get_cursor(api, weave)
     before = get_weave(api, weave)
@@ -394,7 +394,7 @@ def test_typing_at_doc_end_appends_and_follows_cursor(weave, page_as, api):
     assert new_node, "typing at the doc end did not create a node"
     assert new_node["content"] == {"type": "snippet", "text": marker}
     assert new_node["creator"]["type"] == "human"
-    assert new_node["creator"]["label"] == "clement"
+    assert new_node["creator"]["label"] == "uitest-clement"
     assert new_node["parents"] == [cur_before["node_id"]], "not appended at my cursor"
     assert get_cursor(api, weave)["node_id"] == new_node["id"], "cursor did not follow"
 
@@ -412,7 +412,7 @@ def test_blank_weave_placeholder_and_focus(blank_weave, page_as, api):
     """An empty weave renders an editable empty doc: CSS-only placeholder (never
     in the buffer), no generate-at-caret bar, and clicking anywhere in the pane
     focuses the contenteditable."""
-    page = page_as("clement", blank_weave)
+    page = page_as("uitest-clement", blank_weave)
     doc = page.locator(".side-pane .doc")
     assert doc.count() == 1, "empty weave did not render the editable doc"
     assert (doc.text_content() or "") == "", "placeholder leaked into the buffer text"
@@ -436,7 +436,7 @@ def test_blank_weave_placeholder_and_focus(blank_weave, page_as, api):
 
 def test_right_click_opens_context_menu(weave, page_as, api):
     """Right-click a node's text -> the global context menu opens on that node."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     page.locator(".doc [data-node-id]").first.click(
         button="right", position={"x": 25, "y": 8}
     )
@@ -457,7 +457,7 @@ def test_right_click_opens_context_menu(weave, page_as, api):
 def test_autoscroll_suppressed_while_pointer_inside(weave, page_as, api):
     """The pane auto-follows the growing thread tail -- but never while the
     reader's pointer is inside the pane (the sacred rule)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
 
     def append(text, parent):
         r = api.post(
@@ -465,8 +465,8 @@ def test_autoscroll_suppressed_while_pointer_inside(weave, page_as, api):
             json={
                 "text": text,
                 "parent_id": parent,
-                "creator": {"type": "human", "label": "clement"},
-                "move_cursor": "clement",
+                "creator": {"type": "human", "label": "uitest-clement"},
+                "move_cursor": "uitest-clement",
             },
         )
         r.raise_for_status()

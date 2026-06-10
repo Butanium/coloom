@@ -84,7 +84,7 @@ def browser():
 
 @pytest.fixture()
 def page_as(browser):
-    """Factory: page_as('clement') -> page logged into that PROFILE, on the picker.
+    """Factory: page_as('uitest-clement') -> page logged into that PROFILE, on the picker.
 
     The app opens on a profile-select gate; we cache the profile name in
     localStorage so autoLogin skips the gate. The profile is RESET server-side

@@ -26,7 +26,7 @@ def test_picker_groups_by_folder_and_collapses(page_as, api, weave):
         _mkweave("foldered-b", "research/personas"),
     ]
     try:
-        page = page_as("clement")
+        page = page_as("uitest-clement")
         head = page.get_by_test_id("folder-research/personas")
         expect(head).to_be_visible()
         expect(head).to_contain_text("2")
@@ -49,7 +49,7 @@ def test_picker_groups_by_folder_and_collapses(page_as, api, weave):
 def test_move_weave_to_folder(page_as, api, weave):
     wid = _mkweave("homeless-weave")
     try:
-        page = page_as("clement")
+        page = page_as("uitest-clement")
         page.get_by_test_id(f"move-{wid}").click()
         page.get_by_test_id(f"move-input-{wid}").fill("archive")
         page.get_by_test_id(f"move-save-{wid}").click()
@@ -64,7 +64,7 @@ def test_move_weave_to_folder(page_as, api, weave):
 def test_filter_narrows_titles_and_folders(page_as, api, weave):
     ids = [_mkweave("alpha-weave"), _mkweave("beta-weave", "zeta-folder")]
     try:
-        page = page_as("clement")
+        page = page_as("uitest-clement")
         page.get_by_test_id("weave-filter").fill("alpha")
         expect(page.get_by_text("alpha-weave")).to_be_visible()
         expect(page.get_by_text("beta-weave")).to_have_count(0)
@@ -77,7 +77,7 @@ def test_filter_narrows_titles_and_folders(page_as, api, weave):
 
 
 def test_create_weave_into_folder(page_as, api, weave):
-    page = page_as("clement")
+    page = page_as("uitest-clement")
     page.get_by_placeholder("new weave title…").fill("born-foldered")
     page.get_by_test_id("new-weave-folder").fill("nursery")
     page.get_by_role("button", name="create", exact=True).click()

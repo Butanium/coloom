@@ -2,8 +2,8 @@
 KeybindingsDialog.svelte, and the keyboard.svelte.ts table-dispatch refactor).
 
 Every mutation is verified through the REST API, not just the DOM. Each test
-seeds its own weave (the `weave` fixture). Identity under test: "clement"
-(seed parks clement's cursor on a bookmarked node — see seed_dev_weave.py).
+seeds its own weave (the `weave` fixture). Identity under test: "uitest-clement"
+(seed parks uitest-clement's cursor on a bookmarked node — see seed_dev_weave.py).
 """
 
 import re
@@ -36,7 +36,7 @@ def weave_json(api, wid):
     return r.json()
 
 
-def cursor_node(api, wid, name="clement"):
+def cursor_node(api, wid, name="uitest-clement"):
     r = api.get(f"/weaves/{wid}/cursors")
     r.raise_for_status()
     return r.json()[name]["node_id"]
@@ -88,7 +88,7 @@ def assert_no_generation(page, api, wid, key: str):
 
 
 def test_default_g_generates(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cur = cursor_node(api, weave)
     before = list(children_of(api, weave, cur))
     page.keyboard.press("g")
@@ -99,7 +99,7 @@ def test_default_g_generates(page_as, weave, api):
 
 
 def test_rebind_generate_to_ctrl_space(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_dialog(page)
     rebind(page, "generate_at_cursor", "Control+Space")
     expect(page.get_by_test_id("kb-binding-generate_at_cursor")).to_have_text(
@@ -118,7 +118,7 @@ def test_rebind_generate_to_ctrl_space(page_as, weave, api):
 
 
 def test_keys_during_capture_do_not_dispatch(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cur = cursor_node(api, weave)
     assert weave_json(api, weave)["nodes"][cur]["bookmarked"] is True  # seeded
 
@@ -142,7 +142,7 @@ def test_keys_during_capture_do_not_dispatch(page_as, weave, api):
 
 
 def test_escape_during_capture_unbinds(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cur = cursor_node(api, weave)
     assert weave_json(api, weave)["nodes"][cur]["bookmarked"] is True  # seeded
 
@@ -163,7 +163,7 @@ def test_escape_during_capture_unbinds(page_as, weave, api):
 
 
 def test_reset_all_restores_defaults(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_dialog(page)
     rebind(page, "generate_at_cursor", "Control+Space")
     expect(page.get_by_test_id("kb-binding-generate_at_cursor")).to_have_text(
@@ -179,7 +179,7 @@ def test_reset_all_restores_defaults(page_as, weave, api):
 
 
 def test_rebind_persists_across_reload(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_dialog(page)
     rebind(page, "generate_at_cursor", "Control+Space")
     close_dialog(page)

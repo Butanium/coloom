@@ -9,9 +9,25 @@ Effects are verified through the REST API (the `api` fixture), not the DOM alone
 
 import json
 
+import pytest
 from playwright.sync_api import expect
 
 SECRET = "sk-TEST-DO-NOT-LEAK-4242"
+
+
+@pytest.fixture(autouse=True)
+def _drawer_closed_after(api):
+    """Drawer open/closed persists per profile (setSetting): reset it so tests
+    in OTHER files sharing the uitest-* profiles never inherit an open drawer."""
+    yield
+    for p in api.get("/profiles").json():
+        name = p["name"]
+        if not name.startswith("uitest-"):
+            continue
+        settings = api.get(f"/profiles/{name}").json()["settings"]
+        if settings.get("setupsDrawerOpen"):
+            settings["setupsDrawerOpen"] = False
+            api.put(f"/profiles/{name}", json={"settings": settings})
 
 
 def _models(api):
@@ -27,9 +43,12 @@ def _find(items, name):
 
 
 def _open_dialog(page):
-    page.get_by_test_id("open-setups").click()
-    page.wait_for_timeout(250)
-    assert page.get_by_role("dialog").is_visible()
+    """Open the setups drawer if not already open (the setups button toggles)."""
+    drawer = page.get_by_test_id("setups-drawer")
+    if drawer.count() == 0:
+        page.get_by_test_id("open-setups").click()
+        page.wait_for_timeout(250)
+    assert drawer.is_visible()
 
 
 def _fill_params(page, testid, params):
@@ -85,7 +104,7 @@ def _create_sampler(page, api, name, model_id, params="{}"):
 def test_create_model_with_arbitrary_flags_and_key_redaction(page_as, api, weave):
     """Model with logit_bias object + stop array survives the round trip;
     api_key is redacted to '***' in every response (never echoed)."""
-    page = page_as("alice", weave)
+    page = page_as("uitest-alice", weave)
     _open_dialog(page)
     mid = None
     try:
@@ -114,7 +133,7 @@ def test_create_model_with_arbitrary_flags_and_key_redaction(page_as, api, weave
 
 def test_sampler_override_and_fanout_button(page_as, api, weave):
     """Two samplers over one model, both active → gen button shows fan-out ×2."""
-    page = page_as("bob", weave)
+    page = page_as("uitest-bob", weave)
     _open_dialog(page)
     mid = s_wild = s_safe = None
     try:
@@ -139,8 +158,8 @@ def test_sampler_override_and_fanout_button(page_as, api, weave):
 def test_fanout_generation_merges_params(page_as, api, weave):
     """Activate 2 samplers, weave at cursor → children carry the MERGED params
     (model logit_bias + per-sampler temperature); the api_key never leaks."""
-    # clement has a cursor in the seeded weave, so the gen button is enabled
-    page = page_as("clement", weave)
+    # uitest-clement has a cursor in the seeded weave, so the gen button is enabled
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = s_hi = s_lo = None
     try:
@@ -158,7 +177,7 @@ def test_fanout_generation_merges_params(page_as, api, weave):
         page.keyboard.press("Escape")
         page.wait_for_timeout(200)
 
-        cursor = api.get(f"/weaves/{weave}").json()["cursors"]["clement"]["node_id"]
+        cursor = api.get(f"/weaves/{weave}").json()["cursors"]["uitest-clement"]["node_id"]
         before = set(api.get(f"/weaves/{weave}").json()["nodes"])
         btn = page.get_by_test_id("gen-button")
         assert not btn.is_disabled()
@@ -189,7 +208,7 @@ def test_fanout_generation_merges_params(page_as, api, weave):
 
 def test_rapid_fire_generate_inflight_resets(page_as, api, weave):
     """Three active samplers, click weave → inflight counter returns to 0."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = sids = None
     sids = []
@@ -221,7 +240,7 @@ def test_rapid_fire_generate_inflight_resets(page_as, api, weave):
 def test_edit_model_while_sampler_active(page_as, api, weave):
     """Editing a model setup that an active sampler references keeps the sampler
     active and the new params take effect."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = sid = None
     try:
@@ -252,7 +271,7 @@ def test_edit_model_while_sampler_active(page_as, api, weave):
 def test_delete_referenced_model_surfaces_conflict(page_as, api, weave):
     """Deleting a model that a sampler references → 409, surfaced as a toast,
     not silently swallowed; the model stays."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = sid = None
     try:
@@ -280,7 +299,7 @@ def test_delete_referenced_model_surfaces_conflict(page_as, api, weave):
 def test_delete_active_sampler_drops_from_localstorage(page_as, api, weave):
     """Deleting a sampler that is active → UI drops it gracefully (no stale id,
     gen button reverts to plain weave)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = sid = None
     try:
@@ -313,7 +332,7 @@ def test_bad_param_rows_surface_not_swallowed(page_as, api, weave):
     """Invalid param rows (value without a name, duplicate names) must surface
     an inline error and NOT create the setup. (Values themselves can't be
     'malformed' anymore: non-JSON input is a legitimate string param.)"""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     try:
         page.get_by_test_id("m-name").fill("bad-rows")
@@ -349,7 +368,7 @@ def test_bad_param_rows_surface_not_swallowed(page_as, api, weave):
 def test_bare_string_param_value_round_trips(page_as, api, weave):
     """A value typed without JSON quoting (e.g. a stop sequence 'END') is kept
     as a string; numbers/objects typed as JSON literals keep their types."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = None
     try:
@@ -368,7 +387,7 @@ def test_bare_string_param_value_round_trips(page_as, api, weave):
 
 def test_empty_name_rejected(page_as, api, weave):
     """A whitespace-only / empty name must be rejected client-side, no POST."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     before = len(_models(api))
     page.get_by_test_id("m-name").fill("   ")
@@ -383,7 +402,7 @@ def test_empty_name_rejected(page_as, api, weave):
 def test_patch_api_key_set_keep_clear(page_as, api, weave):
     """PATCH api_key semantics through the UI: keep (omit) preserves, set replaces,
     clear removes. Verified via REST (a literal key shows '***', cleared shows null)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     mid = None
     try:
@@ -425,7 +444,7 @@ def test_patch_api_key_set_keep_clear(page_as, api, weave):
 def test_mutual_exclusion_api_key_and_env(page_as, api, weave):
     """Setting both api_key and api_key_env must be rejected (400 from server,
     surfaced as an inline error)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     _open_dialog(page)
     try:
         page.get_by_test_id("m-name").fill("mutex")
@@ -445,7 +464,7 @@ def test_mutual_exclusion_api_key_and_env(page_as, api, weave):
 
 def test_generator_menu_hide_and_multi_active_presets(page_as, api, weave):
     """The generators menu hides/shows chips; preset chips toggle multi-active."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     presets = list(api.get("/presets").json()["presets"])
     # activate two presets via their chips
     page.get_by_test_id(f"gc-preset-{presets[0]}").click()
@@ -462,10 +481,54 @@ def test_generator_menu_hide_and_multi_active_presets(page_as, api, weave):
     expect(page.locator(".generators .chip")).to_have_count(before)
 
 
+def test_drawer_collapses_and_canvas_stays_interactive(page_as, api, weave):
+    """The drawer is NON-MODAL: chips and canvas stay usable while it's open;
+    collapse/expand works from both buttons; open state roams with the profile."""
+    page = page_as("uitest-clement", weave)
+    _open_dialog(page)
+    drawer = page.get_by_test_id("setups-drawer")
+
+    # chips row above the drawer stays clickable (no backdrop intercepts)
+    presets = list(api.get("/presets").json()["presets"])
+    chip = page.get_by_test_id(f"gc-preset-{presets[0]}")
+    chip.click()
+    expect(page.locator(".generators .chip.active")).to_have_count(1)
+    chip.click()  # restore
+    expect(page.locator(".generators .chip.active")).to_have_count(0)
+
+    # the canvas behind it is interactive: right-click a card opens the menu
+    page.keyboard.press("Control+0")  # fit weave so cards are in view
+    page.wait_for_timeout(200)
+    card = page.locator(".canvas .text").filter(has_text="The loom hummed").first
+    card.click(button="right")
+    expect(page.locator(".menu[role='menu']")).to_be_visible()
+    # click-away closes the menu but NOT the drawer (there is no overlay)
+    canvas_box = page.locator(".canvas").bounding_box()
+    page.mouse.click(canvas_box["x"] + 8, canvas_box["y"] + 8)
+    expect(page.locator(".menu[role='menu']")).to_have_count(0)
+    expect(drawer).to_be_visible()
+
+    # collapse via the drawer's own button; persisted closed across reload
+    page.get_by_test_id("setups-collapse").click()
+    expect(drawer).to_have_count(0)
+    page.wait_for_timeout(1200)  # setSetting debounce (800ms) must flush its PUT
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(600)
+    expect(page.get_by_test_id("setups-drawer")).to_have_count(0)
+
+    # reopen via the toggle button; persisted open across reload
+    page.get_by_test_id("open-setups").click()
+    expect(page.get_by_test_id("setups-drawer")).to_be_visible()
+    page.wait_for_timeout(1200)
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(600)
+    expect(page.get_by_test_id("setups-drawer")).to_be_visible()
+
+
 def test_clone_preset_into_editable_setup(page_as, api, weave):
     """'→ setup' on a preset prefills the model form (name/base_url/model/params)
     — create it and the params survive as an editable model setup."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     page.get_by_test_id("open-gen-menu").click()
     page.get_by_test_id("menu-clone-preset-default").click()
     page.wait_for_timeout(400)

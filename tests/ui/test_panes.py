@@ -85,7 +85,7 @@ def test_bookmarks_tab_lists_seeded_bookmarks(weave, page_as, api):
     w = get_weave(api, weave)
     assert len(w["bookmarks"]) == 2, "seed should have exactly 2 bookmarks"
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "marks")
     rows = page.locator(".tab-body li")
     expect(rows).to_have_count(2, timeout=4000)
@@ -101,13 +101,13 @@ def test_bookmarks_tab_lists_seeded_bookmarks(weave, page_as, api):
 
 def test_bookmark_click_moves_my_cursor_and_centers_canvas(weave, page_as, api):
     w = get_weave(api, weave)
-    start = get_cursors(api, weave)["clement"]["node_id"]
+    start = get_cursors(api, weave)["uitest-clement"]["node_id"]
     # pick the bookmark my cursor is NOT already on, so the move is observable
     target_idx, target = next(
         (i, b) for i, b in enumerate(w["bookmarks"]) if b != start
     )
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "marks")
     tf_before = canvas_transform(page)
 
@@ -115,14 +115,14 @@ def test_bookmark_click_moves_my_cursor_and_centers_canvas(weave, page_as, api):
     expect(row).to_be_visible()
     row.click()
 
-    # API: clement's cursor moved to the bookmarked node, moved_by=clement
+    # API: uitest-clement's cursor moved to the bookmarked node, moved_by=uitest-clement
     cur = wait_until(
         lambda: (lambda c: c if c["node_id"] == target else None)(
-            get_cursors(api, weave)["clement"]
+            get_cursors(api, weave)["uitest-clement"]
         ),
-        f"clement's cursor should move to bookmark {target[:8]}",
+        f"uitest-clement's cursor should move to bookmark {target[:8]}",
     )
-    assert cur["moved_by"] == "clement"
+    assert cur["moved_by"] == "uitest-clement"
 
     # DOM: the canvas centered on the node (view transform changed)
     wait_until(
@@ -135,7 +135,7 @@ def test_unbookmark_button_removes_bookmark_and_row(weave, page_as, api):
     w = get_weave(api, weave)
     first = w["bookmarks"][0]
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "marks")
     cursors_before = get_cursors(api, weave)
 
@@ -157,8 +157,8 @@ def test_unbookmark_button_removes_bookmark_and_row(weave, page_as, api):
     expect(page.locator(".tab-body li")).to_have_count(1, timeout=4000)
 
     # the ✕ must NOT also jump my cursor (it sits next to the jump button)
-    assert get_cursors(api, weave)["clement"]["node_id"] == (
-        cursors_before["clement"]["node_id"]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == (
+        cursors_before["uitest-clement"]["node_id"]
     ), "clicking the un-bookmark button must not move my cursor"
 
 
@@ -166,7 +166,7 @@ def test_unbookmark_button_removes_bookmark_and_row(weave, page_as, api):
 
 
 def test_activity_shows_seeded_history(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "activity")
     feed = page.locator(".tab-body")
 
@@ -188,7 +188,7 @@ def test_activity_shows_seeded_history(weave, page_as, api):
 
 
 def test_activity_feed_grows_live_with_claude_attribution(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "activity")
     feed = page.locator(".tab-body")
 
@@ -197,7 +197,7 @@ def test_activity_feed_grows_live_with_claude_attribution(weave, page_as, api):
     done_one = feed.locator("li", has_text="done: 1 branch at")  # n=1 unique to this test
     expect(done_one).to_have_count(0)
 
-    # claude generates (via API, at claude's own cursor) while clement watches
+    # uitest-claude generates (via API, at uitest-claude's own cursor) while uitest-clement watches
     errors: list[Exception] = []
 
     def gen_as_claude():
@@ -205,7 +205,7 @@ def test_activity_feed_grows_live_with_claude_attribution(weave, page_as, api):
             with httpx.Client(base_url=API, timeout=30) as c:
                 c.post(
                     f"/weaves/{weave}/gen",
-                    json={"cursor": "claude", "params": {"n": 1}},
+                    json={"cursor": "uitest-claude", "params": {"n": 1}},
                 ).raise_for_status()
         except Exception as e:  # surfaced below; thread must not die silently
             errors.append(e)
@@ -213,12 +213,12 @@ def test_activity_feed_grows_live_with_claude_attribution(weave, page_as, api):
     t = threading.Thread(target=gen_as_claude)
     t.start()
     try:
-        # 'claude is weaving at …' appears live (no reload), attributed to claude
+        # 'uitest-claude is weaving at …' appears live (no reload), attributed to uitest-claude
         expect(weaving).to_have_count(n_before + 1, timeout=6000)
-        expect(weaving.first.locator(".actor")).to_have_text("claude")
-        # …then 'claude done: 1 branch at …'
+        expect(weaving.first.locator(".actor")).to_have_text("uitest-claude")
+        # …then 'uitest-claude done: 1 branch at …'
         expect(done_one).to_have_count(1, timeout=8000)
-        expect(done_one.first.locator(".actor")).to_have_text("claude")
+        expect(done_one.first.locator(".actor")).to_have_text("uitest-claude")
     finally:
         t.join(timeout=15)
     assert not errors, f"generation request failed: {errors}"
@@ -228,25 +228,55 @@ def test_activity_look_here_phrasing(weave, page_as, api):
     w = get_weave(api, weave)
     target = w["roots"][1]  # the "Chapter 2" root
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "activity")
 
-    # claude moves CLEMENT's cursor — the "look here" gesture
+    # uitest-claude moves CLEMENT's cursor — the "look here" gesture
     api.put(
-        f"/weaves/{weave}/cursors/clement",
-        json={"node_id": target, "moved_by": "claude"},
+        f"/weaves/{weave}/cursors/uitest-clement",
+        json={"node_id": target, "moved_by": "uitest-claude"},
     ).raise_for_status()
 
-    entry = page.locator(".tab-body li.lookhere", has_text="moved clement's cursor to")
+    entry = page.locator(".tab-body li.lookhere", has_text="moved uitest-clement's cursor to")
     expect(entry).to_have_count(1, timeout=6000)
-    expect(entry.first.locator(".actor")).to_have_text("claude")
+    expect(entry.first.locator(".actor")).to_have_text("uitest-claude")
     # sanity through the API: the gesture really landed
-    cur = get_cursors(api, weave)["clement"]
-    assert cur["node_id"] == target and cur["moved_by"] == "claude"
+    cur = get_cursors(api, weave)["uitest-clement"]
+    assert cur["node_id"] == target and cur["moved_by"] == "uitest-claude"
+
+
+def test_activity_hides_plain_cursor_moves_until_a_real_event(weave, page_as, api):
+    """Plain navigation (self cursor moves) is feed chatter: an entry shows only
+    once a real (non-cursor) event follows it. Summons always show (covered by
+    test_activity_look_here_phrasing)."""
+    w = get_weave(api, weave)
+    target = w["roots"][1]
+
+    page = page_as("uitest-clement", weave)
+    open_tab(page, "activity")
+    feed = page.locator(".tab-body")
+    moves = feed.locator("li", has_text="moved their cursor to").filter(
+        has_text="uitest-claude"
+    )
+    n_before = moves.count()
+
+    # uitest-claude navigates (moves their own cursor) → NO new feed entry
+    api.put(
+        f"/weaves/{weave}/cursors/uitest-claude",
+        json={"node_id": target, "moved_by": "uitest-claude"},
+    ).raise_for_status()
+    page.wait_for_timeout(1200)  # give the WS event time to (not) render
+    assert moves.count() == n_before, "a plain cursor move must not show on its own"
+
+    # a real event lands right after → the preceding move becomes visible
+    api.put(
+        f"/weaves/{weave}/nodes/{target}/bookmark", json={"bookmarked": True}
+    ).raise_for_status()
+    expect(moves).to_have_count(n_before + 1, timeout=6000)
 
 
 def test_activity_hover_highlights_node_and_click_moves_no_cursor(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "activity")
 
     # newest 'added a root' entry = the "Chapter 2" root (seeded last of the two)
@@ -281,7 +311,7 @@ def test_activity_hover_highlights_node_and_click_moves_no_cursor(weave, page_as
 
 
 def test_info_title_edit_persists(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "info")
 
     title_input = page.locator(".tab-body .field input")
@@ -298,7 +328,7 @@ def test_info_title_edit_persists(weave, page_as, api):
 
 
 def test_info_description_edit_persists(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "info")
 
     desc = page.locator(".tab-body .field textarea")
@@ -314,34 +344,43 @@ def test_info_description_edit_persists(weave, page_as, api):
 
 
 def test_info_metadata_add_and_delete(weave, page_as, api):
-    assert get_weave(api, weave)["metadata"] == {}, "seed weave starts without metadata"
+    # seed weaves start in the testing folder; that's their only metadata
+    base = get_weave(api, weave)["metadata"]
+    assert base == {"folder": "testing"}, "unexpected seed-weave metadata"
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "info")
 
     page.get_by_placeholder("new key").fill("mood")
-    page.get_by_placeholder("value").fill("midnight loom")
+    # the folder row also has a "value" input now — scope to the add row
+    page.locator(".meta-row.add").get_by_placeholder("value").fill("midnight loom")
     add_btn = page.locator(".tab-body button[title='add entry']")
     expect(add_btn).to_be_enabled()
     add_btn.click()
 
     wait_until(
-        lambda: get_weave(api, weave)["metadata"] == {"mood": "midnight loom"},
+        lambda: get_weave(api, weave)["metadata"] == {**base, "mood": "midnight loom"},
         "added metadata entry should persist via PATCH",
     )
-    # the committed row appears, the draft inputs reset
-    row = page.locator(".tab-body .meta-row").first
+    # the committed row appears after the pre-existing folder row, drafts reset
+    # (CSS [value=] matches attributes, not live input state — go positional)
+    row = page.locator(".tab-body .meta-row:not(.add)").nth(1)
     expect(row.locator("input.k")).to_have_value("mood", timeout=4000)
     expect(row.locator("input.v")).to_have_value("midnight loom")
     expect(page.get_by_placeholder("new key")).to_have_value("")
 
-    # delete it
+    # delete it — back to just the folder entry. Let the add's WS refetch finish
+    # re-rendering rows first, then RE-RESOLVE the row (clicking a stale node
+    # mid-re-render can land on the wrong row).
+    page.wait_for_timeout(500)
+    row = page.locator(".tab-body .meta-row:not(.add)").nth(1)
+    expect(row.locator("input.k")).to_have_value("mood")
     row.get_by_label("remove entry").click()
     wait_until(
-        lambda: get_weave(api, weave)["metadata"] == {},
+        lambda: get_weave(api, weave)["metadata"] == base,
         "removed metadata entry should persist via PATCH",
     )
-    expect(page.locator(".tab-body .meta-row:not(.add)")).to_have_count(0, timeout=4000)
+    expect(page.locator(".tab-body .meta-row:not(.add)")).to_have_count(1, timeout=4000)
 
 
 def test_info_stats_match_api(weave, page_as, api):
@@ -354,7 +393,7 @@ def test_info_stats_match_api(weave, page_as, api):
         label = n["creator"].get("label") or "unknown"
         by_creator[label] = by_creator.get(label, 0) + 1
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     open_tab(page, "info")
     table = page.locator(".tab-body table")
     expect(table).to_be_visible()
@@ -384,7 +423,7 @@ def test_footer_stats_match_api_and_update_after_generation(weave, page_as, api)
     humans = sum(1 for n in nodes if n["creator"]["type"] == "human")
     models = sum(1 for n in nodes if n["creator"]["type"] == "model")
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     footer = page.locator("footer")
     expect(footer.locator("span").first).to_have_text(
         f"{len(nodes)} nodes · {len(w['bookmarks'])} bookmarked · "
@@ -397,7 +436,7 @@ def test_footer_stats_match_api_and_update_after_generation(weave, page_as, api)
     # generate 2 nodes via the API -> footer updates live over WS
     api.post(
         f"/weaves/{weave}/gen",
-        json={"node_id": w["roots"][1], "cursor": "clement", "params": {"n": 2}},
+        json={"node_id": w["roots"][1], "cursor": "uitest-clement", "params": {"n": 2}},
     ).raise_for_status()
 
     expect(footer.locator("span").first).to_have_text(

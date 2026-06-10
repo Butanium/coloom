@@ -1,6 +1,6 @@
 """Adversarial UI tests for multi-client live sync — coloom's core differentiator.
 
-Two real browser pages on the SAME weave (clement + claude, separate contexts /
+Two real browser pages on the SAME weave (uitest-clement + uitest-claude, separate contexts /
 separate WS connections). Every cross-client effect is verified through BOTH the
 other client's DOM and the REST API.
 
@@ -87,9 +87,17 @@ def canvas_cards(page):
     return page.locator(".canvas g.card")
 
 
+def pill_label(name: str) -> str:
+    """Mirror NodeCard's pill truncation: names >14 chars middle-truncate
+    (7 chars + … + last 6), so prefix-sharing names keep distinct pills."""
+    return f"{name[:7]}…{name[-6:]}" if len(name) > 14 else name
+
+
 def card_with_cursor_pill(page, name: str):
     """The canvas card carrying the named cursor's pill (exact label match)."""
-    pill = page.locator("text.pill-label").filter(has_text=re.compile(rf"^{name}$"))
+    pill = page.locator("text.pill-label").filter(
+        has_text=re.compile(rf"^{re.escape(pill_label(name))}$")
+    )
     return canvas_cards(page).filter(has=pill)
 
 
@@ -101,10 +109,10 @@ def footer_nodes(page) -> str:
 
 
 def test_generation_in_a_appears_live_in_b(weave, page_as, api):
-    """clement generates via the gen controls; claude's client (no reload, no
+    """uitest-clement generates via the gen controls; uitest-claude's client (no reload, no
     interaction with the weave) grows the new cards and logs it in the feed."""
-    page_a = page_as("clement", weave)
-    page_b = page_as("claude", weave)
+    page_a = page_as("uitest-clement", weave)
+    page_b = page_as("uitest-claude", weave)
 
     n0 = len(get_weave(api, weave)["nodes"])
 
@@ -121,8 +129,8 @@ def test_generation_in_a_appears_live_in_b(weave, page_as, api):
     expect(gen_btn).to_be_enabled()
     gen_btn.click()
 
-    # API ground truth: exactly 3 new nodes, children of clement's cursor node
-    cursor_node = get_cursors(api, weave)["clement"]["node_id"]
+    # API ground truth: exactly 3 new nodes, children of uitest-clement's cursor node
+    cursor_node = get_cursors(api, weave)["uitest-clement"]["node_id"]
     wait_until(
         lambda: len(get_weave(api, weave)["nodes"]) == n0 + 3,
         "generation should add 3 nodes (n=3 default preset)",
@@ -145,23 +153,23 @@ def test_generation_in_a_appears_live_in_b(weave, page_as, api):
     fit_weave(page_b)
     expect(canvas_cards(page_b)).to_have_count(n0 + 3, timeout=4000)
 
-    # B's activity feed shows the generation, attributed to clement
+    # B's activity feed shows the generation, attributed to uitest-clement
     weaving = feed.locator("li", has_text="is weaving at")
     expect(weaving).to_have_count(weaving_before + 1, timeout=6000)
-    expect(weaving.first.locator(".actor")).to_have_text("clement")
+    expect(weaving.first.locator(".actor")).to_have_text("uitest-clement")
     done = feed.locator("li", has_text="done: 3 branches at")
     expect(done).to_have_count(done3_before + 1, timeout=8000)
-    expect(done.first.locator(".actor")).to_have_text("clement")
+    expect(done.first.locator(".actor")).to_have_text("uitest-clement")
 
 
 # ============================================================ the look-here gesture
 
 
 def test_summon_via_context_menu_redirects_other_text_pane(weave, page_as, api):
-    """claude right-clicks 'Chapter 2' and summons clement there; clement's
+    """uitest-claude right-clicks 'Chapter 2' and summons uitest-clement there; uitest-clement's
     text pane thread must change to the new position without any action by A."""
-    page_a = page_as("clement", weave)
-    page_b = page_as("claude", weave)
+    page_a = page_as("uitest-clement", weave)
+    page_b = page_as("uitest-claude", weave)
 
     w = get_weave(api, weave)
     ch2 = w["roots"][1]
@@ -172,7 +180,7 @@ def test_summon_via_context_menu_redirects_other_text_pane(weave, page_as, api):
     expect(doc_a).to_contain_text("The loom hummed")
     expect(doc_a).not_to_contain_text("Chapter 2")
 
-    # B: right-click the Chapter 2 card, pick "summon clement here"
+    # B: right-click the Chapter 2 card, pick "summon uitest-clement here"
     fit_weave(page_b)
     card = canvas_cards(page_b).filter(has_text="Chapter 2. A completely different")
     expect(card).to_have_count(1)
@@ -180,7 +188,7 @@ def test_summon_via_context_menu_redirects_other_text_pane(weave, page_as, api):
     # contextmenu event bubbles to the g.card handler
     card.locator("div.text").click(button="right")
     summon = page_b.locator(".menu").get_by_role(
-        "menuitem", name="summon clement here"
+        "menuitem", name="summon uitest-clement here"
     )
     expect(summon).to_be_visible()
     summon.click()
@@ -188,11 +196,11 @@ def test_summon_via_context_menu_redirects_other_text_pane(weave, page_as, api):
     # API: the gesture landed, with attribution
     cur = wait_until(
         lambda: (lambda c: c if c["node_id"] == ch2 else None)(
-            get_cursors(api, weave)["clement"]
+            get_cursors(api, weave)["uitest-clement"]
         ),
-        "clement's cursor should land on the Chapter 2 root",
+        "uitest-clement's cursor should land on the Chapter 2 root",
     )
-    assert cur["moved_by"] == "claude", "moved_by must record who summoned"
+    assert cur["moved_by"] == "uitest-claude", "moved_by must record who summoned"
 
     # A's text pane follows within ~5s: the thread is now the Chapter 2 root
     expect(doc_a).to_contain_text("Chapter 2. A completely different opening:", timeout=6000)
@@ -203,12 +211,12 @@ def test_summon_via_context_menu_redirects_other_text_pane(weave, page_as, api):
 
 
 def test_inflight_generation_shows_weaver_name_in_other_header(weave, page_as, api):
-    """While clement's generation is in flight, claude's header shows the
-    '⟳ … weaving: clement' presence indicator; it disappears when done.
+    """While uitest-clement's generation is in flight, uitest-claude's header shows the
+    '⟳ … weaving: uitest-clement' presence indicator; it disappears when done.
     Timing-sensitive by design (gen window is ~0.4-1.6s on the fake backend),
     hence the eager expect() polling right after the click."""
-    page_a = page_as("clement", weave)
-    page_b = page_as("claude", weave)
+    page_a = page_as("uitest-clement", weave)
+    page_b = page_as("uitest-claude", weave)
 
     indicator_b = page_b.locator("header .inflight")
     expect(indicator_b).to_have_count(0)
@@ -218,7 +226,7 @@ def test_inflight_generation_shows_weaver_name_in_other_header(weave, page_as, a
     page_a.locator(".controls button.gen").click()
 
     # B: indicator appears while in flight, names the weaver
-    expect(indicator_b).to_contain_text("clement", timeout=4000)
+    expect(indicator_b).to_contain_text("uitest-clement", timeout=4000)
     expect(indicator_b).to_contain_text("weaving")
 
     # ...and is gone once the generation finishes (gen_finished event)
@@ -235,21 +243,22 @@ def test_both_cursors_visible_in_both_clients(weave, page_as, api):
     """Both named cursors render as pills on the canvas and dots in the tree,
     in BOTH clients."""
     cursors = get_cursors(api, weave)
-    assert set(cursors) == {"clement", "claude"}, "seed should have both cursors"
+    assert set(cursors) == {"uitest-clement", "uitest-claude"}, "seed should have both cursors"
 
-    for who in ("clement", "claude"):
+    for who in ("uitest-clement", "uitest-claude"):
         page = page_as(who, weave)
         fit_weave(page)
 
         # canvas pills: one per cursor, exact labels
         labels = page.locator(".canvas text.pill-label")
         expect(labels).to_have_count(2, timeout=4000)
-        assert sorted(labels.all_text_contents()) == ["claude", "clement"], (
+        expected = sorted(pill_label(n) for n in ("uitest-claude", "uitest-clement"))
+        assert sorted(labels.all_text_contents()) == expected, (
             f"{who}'s canvas should show both cursor pills"
         )
 
         # tree dots (default sidebar tab is 'tree'): one dot per cursor
-        for name in ("clement", "claude"):
+        for name in ("uitest-clement", "uitest-claude"):
             dot = page.locator(f".sidebar .cdot[title='{name}']")
             expect(dot).to_have_count(1, timeout=4000)
 
@@ -263,16 +272,16 @@ def test_both_cursors_visible_in_both_clients(weave, page_as, api):
 
 
 def test_delete_node_under_other_cursor_relocates_it(weave, page_as, api):
-    """clement deletes the node claude's cursor sits on. The server must
-    relocate claude's cursor (refuge = surviving ancestor) and claude's text
+    """uitest-clement deletes the node uitest-claude's cursor sits on. The server must
+    relocate uitest-claude's cursor (refuge = surviving ancestor) and uitest-claude's text
     pane must follow — no crash, no stale thread (spec shared-state.md §2)."""
-    page_a = page_as("clement", weave)
-    page_b = page_as("claude", weave)
+    page_a = page_as("uitest-clement", weave)
+    page_b = page_as("uitest-claude", weave)
 
     w = get_weave(api, weave)
-    doomed = get_cursors(api, weave)["claude"]["node_id"]
+    doomed = get_cursors(api, weave)["uitest-claude"]["node_id"]
     doomed_node = w["nodes"][doomed]
-    assert doomed_node["children"] == [], "seed: claude's cursor is a leaf"
+    assert doomed_node["children"] == [], "seed: uitest-claude's cursor is a leaf"
     parent = doomed_node["parents"][0]
     doomed_text = node_text(doomed_node)
     n0 = len(w["nodes"])
@@ -281,25 +290,25 @@ def test_delete_node_under_other_cursor_relocates_it(weave, page_as, api):
     doc_b = page_b.locator(".side-pane .doc")
     expect(doc_b).to_contain_text(doomed_text[:40])
 
-    # A: find the card carrying claude's pill and delete it via the context menu
+    # A: find the card carrying uitest-claude's pill and delete it via the context menu
     fit_weave(page_a)
-    card = card_with_cursor_pill(page_a, "claude")
+    card = card_with_cursor_pill(page_a, "uitest-claude")
     expect(card).to_have_count(1)
     card.locator("div.text").click(button="right")
     delete = page_a.locator(".menu").get_by_role("menuitem", name="delete node")
     expect(delete).to_be_visible()
     delete.click()
 
-    # API: node gone, claude's cursor relocated to a surviving ancestor
+    # API: node gone, uitest-claude's cursor relocated to a surviving ancestor
     wait_until(
         lambda: doomed not in get_weave(api, weave)["nodes"],
         "the node should be deleted",
     )
     cur = wait_until(
         lambda: (lambda c: c if c["node_id"] != doomed else None)(
-            get_cursors(api, weave)["claude"]
+            get_cursors(api, weave)["uitest-claude"]
         ),
-        "claude's cursor must be relocated off the deleted node",
+        "uitest-claude's cursor must be relocated off the deleted node",
     )
     assert cur["node_id"] == parent, (
         f"cursor should take refuge on the parent {parent[:8]}, got {cur['node_id'][:8]}"
@@ -322,24 +331,24 @@ def test_delete_node_under_other_cursor_relocates_it(weave, page_as, api):
 
 
 def test_title_edit_in_a_updates_b_header(weave, page_as, api):
-    page_a = page_as("clement", weave)
-    page_b = page_as("claude", weave)
+    page_a = page_as("uitest-clement", weave)
+    page_b = page_as("uitest-claude", weave)
 
     expect(page_b.locator("header h1")).to_have_text("ui-test weave")
 
     open_tab(page_a, "info")
     title_input = page_a.locator(".tab-body .field input")
     expect(title_input).to_have_value("ui-test weave")
-    title_input.fill("renamed live by clement")
+    title_input.fill("renamed live by uitest-clement")
     title_input.press("Enter")  # blur → PATCH
 
     wait_until(
-        lambda: get_weave(api, weave)["title"] == "renamed live by clement",
+        lambda: get_weave(api, weave)["title"] == "renamed live by uitest-clement",
         "PATCH should persist the new title",
     )
     # B's header follows over WS within ~5s, no reload
     expect(page_b.locator("header h1")).to_have_text(
-        "renamed live by clement", timeout=6000
+        "renamed live by uitest-clement", timeout=6000
     )
 
 
@@ -350,7 +359,7 @@ def test_ws_reconnect_resyncs_missed_changes(weave, page_as, api):
     """Kill B's network (set_offline), mutate the weave, restore: B must
     reconnect and resync (onopen → refetch in state.svelte.ts). Skips
     gracefully if Chromium's offline emulation doesn't affect the open WS."""
-    page_b = page_as("claude", weave)
+    page_b = page_as("uitest-claude", weave)
     root1 = get_weave(api, weave)["roots"][1]
     n0 = len(get_weave(api, weave)["nodes"])
     expect(page_b.locator("header .conn")).to_have_attribute("data-state", "live")
@@ -362,7 +371,7 @@ def test_ws_reconnect_resyncs_missed_changes(weave, page_as, api):
     # mutate while B is dark: 2 generated nodes
     api.post(
         f"/weaves/{weave}/gen",
-        json={"node_id": root1, "cursor": "clement", "params": {"n": 2}},
+        json={"node_id": root1, "cursor": "uitest-clement", "params": {"n": 2}},
     ).raise_for_status()
     wait_until(
         lambda: len(get_weave(api, weave)["nodes"]) == n0 + 2,

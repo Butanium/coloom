@@ -135,7 +135,7 @@ def squares_inside_container(page) -> bool:
 def test_graph_shows_all_nodes_ignoring_collapse(page_as, api, weave):
     """Collapse a subtree in the tree list, then switch to graph: every node
     must still be a square (the minimap deliberately ignores the collapse set)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     w = get_weave(api, weave)
     n_nodes = len(w["nodes"])
     assert n_nodes >= 10, f"seed produced suspiciously few nodes: {n_nodes}"
@@ -159,20 +159,20 @@ def test_graph_shows_all_nodes_ignoring_collapse(page_as, api, weave):
 
 
 def test_click_square_moves_my_cursor(page_as, api, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     w = get_weave(api, weave)
-    my_before = get_cursors(api, weave)["clement"]["node_id"]
+    my_before = get_cursors(api, weave)["uitest-clement"]["node_id"]
 
     i, target = find_identifiable_square(page, w["nodes"], exclude={my_before})
     page.locator(SQUARES).nth(i).click()
 
     wait_until(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == target,
-        msg=f"clement cursor -> {target} after square click",
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == target,
+        msg=f"uitest-clement cursor -> {target} after square click",
     )
-    cur = get_cursors(api, weave)["clement"]
-    assert cur["moved_by"] == "clement"
+    cur = get_cursors(api, weave)["uitest-clement"]
+    assert cur["moved_by"] == "uitest-clement"
 
     # the clicked square should now carry my cursor outline (after WS refetch)
     page.wait_for_timeout(600)
@@ -184,10 +184,10 @@ def test_click_square_moves_my_cursor(page_as, api, weave):
 def test_modified_clicks_do_not_move_cursor(page_as, api, weave):
     """ctrl+click and middle-click are 'teleport view' gestures: they must
     recenter the view but leave my cursor untouched."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     w = get_weave(api, weave)
-    before = get_cursors(api, weave)["clement"]
+    before = get_cursors(api, weave)["uitest-clement"]
 
     # pan away first so a recenter visibly changes the transform
     box = page.locator(GRAPH).bounding_box()
@@ -205,7 +205,7 @@ def test_modified_clicks_do_not_move_cursor(page_as, api, weave):
     sq = page.locator(SQUARES).nth(i)
     sq.click(modifiers=["Control"])
     page.wait_for_timeout(700)
-    after_ctrl = get_cursors(api, weave)["clement"]
+    after_ctrl = get_cursors(api, weave)["uitest-clement"]
     assert after_ctrl["node_id"] == before["node_id"], "ctrl+click moved the cursor"
     assert after_ctrl["updated"] == before["updated"], "ctrl+click touched the cursor"
     t_centered = view_transform(page)
@@ -215,15 +215,15 @@ def test_modified_clicks_do_not_move_cursor(page_as, api, weave):
 
     sq.click(button="middle")
     page.wait_for_timeout(700)
-    after_mid = get_cursors(api, weave)["clement"]
+    after_mid = get_cursors(api, weave)["uitest-clement"]
     assert after_mid["node_id"] == before["node_id"], "middle-click moved the cursor"
     assert after_mid["updated"] == before["updated"], "middle-click touched the cursor"
 
 
 def test_right_click_opens_context_menu(page_as, api, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
-    before = get_cursors(api, weave)["clement"]
+    before = get_cursors(api, weave)["uitest-clement"]
 
     page.locator(SQUARES).nth(0).click(button="right")
     menu = page.locator("div.menu")
@@ -238,13 +238,13 @@ def test_right_click_opens_context_menu(page_as, api, weave):
     menu.wait_for(state="hidden", timeout=3000)
 
     page.wait_for_timeout(400)
-    after = get_cursors(api, weave)["clement"]
+    after = get_cursors(api, weave)["uitest-clement"]
     assert after["node_id"] == before["node_id"], "right-click moved the cursor"
     assert after["updated"] == before["updated"]
 
 
 def test_bookmark_ribbons_and_cursor_outlines(page_as, api, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     park_mouse(page)
     w = get_weave(api, weave)
@@ -270,7 +270,7 @@ def test_bookmark_ribbons_and_cursor_outlines(page_as, api, weave):
 
 
 def test_hover_highlights_square_tooltip_and_tree_row(page_as, api, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     w = get_weave(api, weave)
 
@@ -315,9 +315,9 @@ def test_hover_highlights_square_tooltip_and_tree_row(page_as, api, weave):
 
 
 def test_drag_pans_and_is_not_a_click(page_as, api, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
-    before_cursor = get_cursors(api, weave)["clement"]
+    before_cursor = get_cursors(api, weave)["uitest-clement"]
 
     # drag starting ON a square: must pan, must NOT move the cursor
     sq_box = page.locator(SQUARES).nth(0).bounding_box()
@@ -334,7 +334,7 @@ def test_drag_pans_and_is_not_a_click(page_as, api, weave):
     )
 
     page.wait_for_timeout(700)
-    after_cursor = get_cursors(api, weave)["clement"]
+    after_cursor = get_cursors(api, weave)["uitest-clement"]
     assert after_cursor["node_id"] == before_cursor["node_id"], (
         "a drag that started on a square was treated as a click (cursor moved)"
     )
@@ -350,13 +350,13 @@ def test_drag_pans_and_is_not_a_click(page_as, api, weave):
     )
     page.locator(SQUARES).nth(i).click()
     wait_until(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == target,
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == target,
         msg="click-after-drag still moves the cursor",
     )
 
 
 def test_wheel_pans_and_ctrl_wheel_zooms(page_as, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     box = page.locator(GRAPH).bounding_box()
     cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
@@ -387,7 +387,7 @@ def test_wheel_pans_and_ctrl_wheel_zooms(page_as, weave):
 
 
 def test_fit_weave_button_fits_content(page_as, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     assert squares_inside_container(page), "initial mount should already fit the weave"
 
@@ -409,7 +409,7 @@ def test_fit_weave_button_fits_content(page_as, weave):
 
 
 def test_live_update_new_squares_without_reload(page_as, api, weave):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     goto_graph(page)
     park_mouse(page)
     w = get_weave(api, weave)
@@ -419,7 +419,7 @@ def test_live_update_new_squares_without_reload(page_as, api, weave):
     root_id = next(nid for nid, n in w["nodes"].items() if not n["parents"])
     resp = api.post(
         f"/weaves/{weave}/gen",
-        json={"node_id": root_id, "cursor": "claude", "preset": "default",
+        json={"node_id": root_id, "cursor": "uitest-claude", "preset": "default",
               "params": {"n": 2}},
     )
     resp.raise_for_status()

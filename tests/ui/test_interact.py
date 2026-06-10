@@ -2,14 +2,14 @@
 (keyboard.svelte.ts).
 
 Every mutation is verified through the REST API, not just the DOM. Each test
-seeds its own weave (the `weave` fixture). Identity under test: "clement".
+seeds its own weave (the `weave` fixture). Identity under test: "uitest-clement".
 
 Seeded shape (scripts/seed_dev_weave.py):
-  root1 "The loom hummed quietly…"  (3 children; clement's cursor on child[0],
+  root1 "The loom hummed quietly…"  (3 children; uitest-clement's cursor on child[0],
                                      which is bookmarked and has 3 children)
   root2 "Chapter 2. A completely different opening:" (2 generated children)
   a human interjection leaf " — wait, said the human…" under a split head
-  claude's cursor on a depth-3 leaf
+  uitest-claude's cursor on a depth-3 leaf
 """
 
 import time
@@ -127,7 +127,7 @@ def gen_event_count(api, wid) -> int:
 
 
 def test_menu_opens_at_pointer_escape_and_clickaway_close(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -154,13 +154,13 @@ def test_menu_opens_at_pointer_escape_and_clickaway_close(page_as, weave, api):
 
 
 def test_generate_here_adds_children_cursor_unmoved(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
     root1 = ids["root1"]
     before_children = list(w["nodes"][root1]["children"])
-    cursor_before = get_cursors(api, weave)["clement"]["node_id"]
+    cursor_before = get_cursors(api, weave)["uitest-clement"]["node_id"]
 
     open_menu_on(page, w["nodes"][root1])
     click_item(page, "generate here")
@@ -180,11 +180,11 @@ def test_generate_here_adds_children_cursor_unmoved(page_as, weave, api):
     for nid in new_children:
         assert w2["nodes"][nid]["creator"]["type"] == "model"
     # cursor must NOT move on plain "generate here"
-    assert get_cursors(api, weave)["clement"]["node_id"] == cursor_before
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == cursor_before
 
 
 def test_generate_and_follow_moves_my_cursor(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     target = seed_ids(w)["interject"]  # a leaf
@@ -201,14 +201,14 @@ def test_generate_and_follow_moves_my_cursor(page_as, weave, api):
     w2 = weave_json(api, weave)
     children = w2["nodes"][target]["children"]
     assert len(children) == 3
-    cur = get_cursors(api, weave)["clement"]
+    cur = get_cursors(api, weave)["uitest-clement"]
     assert cur["node_id"] in children, (
         f"cursor {cur['node_id']} not among generated children {children}"
     )
 
 
 def test_add_child_and_add_sibling(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -228,9 +228,9 @@ def test_add_child_and_add_sibling(page_as, weave, api):
     # compare fields, not the whole dict — the serialized creator carries
     # optional nulls (color, id)
     creator = w2["nodes"][child]["creator"]
-    assert (creator["type"], creator["label"]) == ("human", "clement")
+    assert (creator["type"], creator["label"]) == ("human", "uitest-clement")
     poll(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == child,
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == child,
         timeout=4,
         desc="cursor moved to the new child",
     )
@@ -252,7 +252,7 @@ def test_add_child_and_add_sibling(page_as, weave, api):
     assert w3["nodes"][sibling]["parents"] == [root2]
     assert ntext(w3["nodes"][sibling]) == ""
     poll(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == sibling,
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == sibling,
         timeout=4,
         desc="cursor moved to the new sibling",
     )
@@ -266,7 +266,7 @@ def test_add_child_and_add_sibling(page_as, weave, api):
 
 
 def test_bookmark_toggle_via_menu(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -298,46 +298,46 @@ def test_bookmark_toggle_via_menu(page_as, weave, api):
 
 
 def test_move_my_cursor_and_summon_claude(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
     kid1_children = w["nodes"][ids["kids"][1]]["children"]
     target_mine = kid1_children[0]
     target_claude = w["nodes"][ids["root2"]]["children"][1]
-    assert get_cursors(api, weave)["clement"]["node_id"] != target_mine
-    assert get_cursors(api, weave)["claude"]["node_id"] != target_claude
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] != target_mine
+    assert get_cursors(api, weave)["uitest-claude"]["node_id"] != target_claude
 
     open_menu_on(page, w["nodes"][target_mine])
     click_item(page, "move my cursor here")
     cur = poll(
         lambda: (lambda c: c if c["node_id"] == target_mine else None)(
-            get_cursors(api, weave)["clement"]
+            get_cursors(api, weave)["uitest-clement"]
         ),
         timeout=4,
-        desc="clement cursor moved",
+        desc="uitest-clement cursor moved",
     )
-    assert cur["moved_by"] == "clement"
+    assert cur["moved_by"] == "uitest-clement"
 
-    # summon claude: claude's cursor moves, attributed to clement
+    # summon uitest-claude: uitest-claude's cursor moves, attributed to uitest-clement
     page.wait_for_timeout(CLIENT_SYNC * 1000)
     fit_weave(page)
     open_menu_on(page, w["nodes"][target_claude])
-    click_item(page, "summon claude here")
+    click_item(page, "summon uitest-claude here")
     cur = poll(
         lambda: (lambda c: c if c["node_id"] == target_claude else None)(
-            get_cursors(api, weave)["claude"]
+            get_cursors(api, weave)["uitest-claude"]
         ),
         timeout=4,
-        desc="claude cursor summoned",
+        desc="uitest-claude cursor summoned",
     )
-    assert cur["moved_by"] == "clement", f"moved_by={cur['moved_by']}, want clement"
-    # clement's own cursor did not move
-    assert get_cursors(api, weave)["clement"]["node_id"] == target_mine
+    assert cur["moved_by"] == "uitest-clement", f"moved_by={cur['moved_by']}, want uitest-clement"
+    # uitest-clement's own cursor did not move
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == target_mine
 
 
 def test_collapse_expand_via_menu(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -370,7 +370,7 @@ def test_collapse_expand_via_menu(page_as, weave, api):
 
 
 def test_copy_text_and_copy_thread_text(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -396,7 +396,7 @@ def test_copy_text_and_copy_thread_text(page_as, weave, api):
 
 
 def test_delete_children_then_delete_node(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
     ids = seed_ids(w)
@@ -441,7 +441,7 @@ def test_delete_children_then_delete_node(page_as, weave, api):
 def press_and_wait_cursor(page, api, wid, key, expected, desc):
     page.keyboard.press(key)
     poll(
-        lambda: get_cursors(api, wid)["clement"]["node_id"] == expected,
+        lambda: get_cursors(api, wid)["uitest-clement"]["node_id"] == expected,
         timeout=4,
         desc=desc,
     )
@@ -450,18 +450,18 @@ def press_and_wait_cursor(page, api, wid, key, expected, desc):
 
 
 def test_arrow_navigation_moves_my_cursor(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     w = weave_json(api, weave)
     ids = seed_ids(w)
     root1, kids = ids["root1"], ids["kids"]
-    assert get_cursors(api, weave)["clement"]["node_id"] == kids[0]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[0]
 
     # left → parent (root1)
     press_and_wait_cursor(page, api, weave, "ArrowLeft", root1, "left → parent")
     # left again on a root: clamp, no move
     page.keyboard.press("ArrowLeft")
     page.wait_for_timeout(800)
-    assert get_cursors(api, weave)["clement"]["node_id"] == root1
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == root1
     # right → first child
     press_and_wait_cursor(page, api, weave, "ArrowRight", kids[0], "right → first child")
     # down → next sibling
@@ -470,15 +470,65 @@ def test_arrow_navigation_moves_my_cursor(page_as, weave, api):
     # down at the last sibling: clamp, no wrap
     page.keyboard.press("ArrowDown")
     page.wait_for_timeout(800)
-    assert get_cursors(api, weave)["clement"]["node_id"] == kids[2]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[2]
     # up → previous sibling
     press_and_wait_cursor(page, api, weave, "ArrowUp", kids[1], "up → sibling 1")
 
 
-def test_g_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, api):
-    page = page_as("clement", weave)
+def test_sticky_child_navigation_returns_to_last_visited_child(page_as, weave, api):
+    """Going to the parent and back toward the leaves returns to the child I
+    LAST visited, not children[0]."""
+    page = page_as("uitest-clement", weave)
     w = weave_json(api, weave)
-    cursor_node = get_cursors(api, weave)["clement"]["node_id"]
+    ids = seed_ids(w)
+    root1, kids = ids["root1"], ids["kids"]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[0]
+
+    # visit sibling 1, climb to the parent, descend again → back at sibling 1
+    press_and_wait_cursor(page, api, weave, "ArrowDown", kids[1], "down → sibling 1")
+    press_and_wait_cursor(page, api, weave, "ArrowLeft", root1, "left → parent")
+    press_and_wait_cursor(
+        page, api, weave, "ArrowRight", kids[1], "right returns to last-visited child"
+    )
+    # deeper memory: kids[1]'s parent entry updates as I browse, sibling 2 sticks too
+    press_and_wait_cursor(page, api, weave, "ArrowDown", kids[2], "down → sibling 2")
+    press_and_wait_cursor(page, api, weave, "ArrowLeft", root1, "left → parent again")
+    press_and_wait_cursor(
+        page, api, weave, "ArrowRight", kids[2], "stickiness follows the newest visit"
+    )
+
+
+def test_alt_arrow_navigates_even_from_the_text_pane(page_as, weave, api):
+    """Alt+Arrow is a hardwired nav alias that works while focus is in the
+    contenteditable doc; plain arrows stay caret movement there."""
+    page = page_as("uitest-clement", weave)
+    w = weave_json(api, weave)
+    ids = seed_ids(w)
+    root1, kids = ids["root1"], ids["kids"]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[0]
+
+    page.locator(".doc").click()  # focus the editable thread document
+    # plain ArrowLeft in the doc = caret move, NOT navigation
+    page.keyboard.press("ArrowLeft")
+    page.wait_for_timeout(800)
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[0], (
+        "plain arrows inside the doc must not move the weave cursor"
+    )
+    # Alt+ArrowLeft from inside the doc → parent
+    press_and_wait_cursor(
+        page, api, weave, "Alt+ArrowLeft", root1, "alt+left navigates from the doc"
+    )
+    # Alt+ArrowRight → back down (sticky: the child we came from)
+    page.locator(".doc").click()
+    press_and_wait_cursor(
+        page, api, weave, "Alt+ArrowRight", kids[0], "alt+right navigates from the doc"
+    )
+
+
+def test_g_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, api):
+    page = page_as("uitest-clement", weave)
+    w = weave_json(api, weave)
+    cursor_node = get_cursors(api, weave)["uitest-clement"]["node_id"]
     children_before = list(w["nodes"][cursor_node]["children"])
     assert w["nodes"][cursor_node]["bookmarked"] is True  # seeded bookmark
 
@@ -492,7 +542,7 @@ def test_g_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, api):
     w2 = weave_json(api, weave)
     new = [c for c in w2["nodes"][cursor_node]["children"] if c not in children_before]
     assert len(new) == 3  # default preset n=3
-    assert get_cursors(api, weave)["clement"]["node_id"] == cursor_node  # plain g: no follow
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == cursor_node  # plain g: no follow
 
     page.keyboard.press("b")
     poll(
@@ -510,16 +560,16 @@ def test_g_generates_and_b_toggles_bookmark_at_cursor(page_as, weave, api):
 
 
 def test_delete_key_confirms_then_deletes_cursor_node(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     w = weave_json(api, weave)
     ids = seed_ids(w)
     branch = ids["kids"][1]
     victim = w["nodes"][branch]["children"][1]  # a leaf
 
-    # park clement's cursor on the victim via the API, let the client sync
+    # park uitest-clement's cursor on the victim via the API, let the client sync
     api.put(
-        f"/weaves/{weave}/cursors/clement",
-        json={"node_id": victim, "moved_by": "clement"},
+        f"/weaves/{weave}/cursors/uitest-clement",
+        json={"node_id": victim, "moved_by": "uitest-clement"},
     ).raise_for_status()
     page.wait_for_timeout(1000)
 
@@ -536,17 +586,17 @@ def test_delete_key_confirms_then_deletes_cursor_node(page_as, weave, api):
     assert "Delete this node" in dialogs[0]
     # cursor landed on the parent
     poll(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == branch,
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == branch,
         timeout=4,
         desc="cursor moved to parent after delete",
     )
 
 
 def test_c_collapses_subtree_at_cursor(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     fit_weave(page)
     w = weave_json(api, weave)
-    cursor_node = get_cursors(api, weave)["clement"]["node_id"]  # kids[0], 3 children
+    cursor_node = get_cursors(api, weave)["uitest-clement"]["node_id"]  # kids[0], 3 children
     children = w["nodes"][cursor_node]["children"]
     assert len(children) == 3
     grandchild = w["nodes"][children[0]]["children"][0]
@@ -569,7 +619,7 @@ def test_digit_toggles_generator_and_slash_focuses_search(page_as, weave, api):
     """Digits 1..9 TOGGLE the k-th visible generator chip (multi-active)."""
     import re as _re
 
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     presets = api.get("/presets").json()
     names = list(presets["presets"])  # no samplers in a fresh ctx → chips = presets
     active = page.locator(".generators .chip.active")
@@ -600,7 +650,7 @@ def test_digit_toggles_generator_and_slash_focuses_search(page_as, weave, api):
 
 
 def test_ctrl_9_and_ctrl_0_change_canvas_transform(page_as, weave, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     transform = page.locator(".canvas svg > g").first
@@ -628,9 +678,9 @@ def test_typing_in_doc_does_not_trigger_shortcuts(page_as, weave, api):
     """The free-form doc is contenteditable: typing g/b/2/Delete there EDITS
     TEXT (creating human nodes is fine) but must never fire the g-generate,
     b-bookmark, digit-generator-toggle or Delete-node shortcuts."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     w = weave_json(api, weave)
-    cursor_before = get_cursors(api, weave)["clement"]["node_id"]
+    cursor_before = get_cursors(api, weave)["uitest-clement"]["node_id"]
     bookmarked_before = w["nodes"][cursor_before]["bookmarked"]
     gens_before = gen_event_count(api, weave)
 

@@ -4,12 +4,12 @@ Run: cd <repo> && uv run pytest tests/ui/test_canvas.py -q
 
 Every mutation is verified through the REST API, not just the DOM. Each test gets
 a freshly seeded weave (conftest `weave` fixture) and a fresh browser context with
-identity "clement" (so weave cursors `clement` is "mine").
+identity "uitest-clement" (so weave cursors `uitest-clement` is "mine").
 
 Seed shape (scripts/seed_dev_weave.py): root1 (human snippet) -> 3 token branches
 ("kids"); kids[0] has 3 children, the first of which has 2 grandchildren; kids[1]
 has 2 leaf children; kids[2] was split; root2 (human snippet) has 2 leaf children.
-Cursors: clement @ kids[0], claude deep in kids[0]'s subtree. 2 bookmarks.
+Cursors: uitest-clement @ kids[0], uitest-claude deep in kids[0]'s subtree. 2 bookmarks.
 """
 
 import re
@@ -128,9 +128,9 @@ def poll_until(page, fn, desc, timeout_s=6.0):
 
 
 def test_click_card_moves_my_cursor(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
-    before = data["cursors"]["clement"]["node_id"]
+    before = data["cursors"]["uitest-clement"]["node_id"]
     target = data["nodes"][data["roots"][1]]  # second root: never the seeded cursor
     assert target["id"] != before
 
@@ -139,19 +139,19 @@ def test_click_card_moves_my_cursor(weave, page_as, api):
 
     poll_until(
         page,
-        lambda: cursor_node(api, weave, "clement") == target["id"],
-        "clement's cursor to move to the clicked card (API)",
+        lambda: cursor_node(api, weave, "uitest-clement") == target["id"],
+        "uitest-clement's cursor to move to the clicked card (API)",
     )
-    cur = weave_json(api, weave)["cursors"]["clement"]
-    assert cur["moved_by"] == "clement"
+    cur = weave_json(api, weave)["cursors"]["uitest-clement"]
+    assert cur["moved_by"] == "uitest-clement"
     # DOM follows: dashed cursor ring lands on the clicked card after the WS refetch
     expect(locate_card(page, target).locator("rect.cursor-ring")).to_have_count(1)
 
 
 def test_drag_starting_on_card_pans_and_does_not_move_cursor(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
-    before = data["cursors"]["clement"]["node_id"]
+    before = data["cursors"]["uitest-clement"]["node_id"]
     target = data["nodes"][data["roots"][1]]
     assert target["id"] != before
 
@@ -173,7 +173,7 @@ def test_drag_starting_on_card_pans_and_does_not_move_cursor(weave, page_as, api
 
     # an erroneous cursor PUT would land well within this window
     page.wait_for_timeout(800)
-    assert cursor_node(api, weave, "clement") == before, (
+    assert cursor_node(api, weave, "uitest-clement") == before, (
         "a drag that started on a card must NOT be treated as a click"
     )
 
@@ -182,7 +182,7 @@ def test_drag_starting_on_card_pans_and_does_not_move_cursor(weave, page_as, api
 
 
 def test_wheel_scroll_pans_without_zooming(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cb = canvas_box(page)
     page.mouse.move(cb["x"] + cb["width"] / 2, cb["y"] + cb["height"] / 2)
     tx0, ty0, s0 = transform_of(page)
@@ -197,7 +197,7 @@ def test_wheel_scroll_pans_without_zooming(weave, page_as, api):
 
 
 def test_ctrl_wheel_zooms_at_pointer_and_clamps_at_native(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     cb = canvas_box(page)
     # Integer pointer coords: the browser rounds an event's clientX/Y to whole
     # pixels, and any fractional remainder (the canvas top can be non-integral,
@@ -246,12 +246,12 @@ def test_ctrl_wheel_zooms_at_pointer_and_clamps_at_native(weave, page_as, api):
 
 
 def test_toolbar_generate_adds_children(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     root2 = data["roots"][1]
     target = data["nodes"][data["nodes"][root2]["children"][0]]  # a leaf
     assert target["children"] == []
-    cursor_before = data["cursors"]["clement"]["node_id"]
+    cursor_before = data["cursors"]["uitest-clement"]["node_id"]
 
     fit_weave(page)
     card = locate_card(page, target)
@@ -271,7 +271,7 @@ def test_toolbar_generate_adds_children(weave, page_as, api):
     for cid in new_children:
         assert after["nodes"][cid]["creator"]["type"] == "model"
     # plain click must NOT move my cursor
-    assert after["cursors"]["clement"]["node_id"] == cursor_before
+    assert after["cursors"]["uitest-clement"]["node_id"] == cursor_before
 
     # toolbar unmounts when un-hovered
     page.mouse.move(10, 10)
@@ -279,7 +279,7 @@ def test_toolbar_generate_adds_children(weave, page_as, api):
 
 
 def test_toolbar_add_child_creates_human_node_and_moves_cursor(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     root2 = data["roots"][1]
     target = data["nodes"][data["nodes"][root2]["children"][1]]  # another leaf
@@ -299,15 +299,15 @@ def test_toolbar_add_child_creates_human_node_and_moves_cursor(weave, page_as, a
     after = weave_json(api, weave)
     child = after["nodes"][children[0]]
     assert child["creator"]["type"] == "human"
-    assert child["creator"]["label"] == "clement"
+    assert child["creator"]["label"] == "uitest-clement"
     assert node_text(child) == ""
-    assert after["cursors"]["clement"]["node_id"] == child["id"], (
+    assert after["cursors"]["uitest-clement"]["node_id"] == child["id"], (
         "add-child must move my cursor to the new child"
     )
 
 
 def test_toolbar_bookmark_toggles_on_and_off(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     target = data["nodes"][data["roots"][1]]
     assert not target["bookmarked"]
@@ -339,18 +339,18 @@ def test_toolbar_bookmark_toggles_on_and_off(weave, page_as, api):
 def test_toolbar_delete_removes_subtree_and_relocates_stranded_cursors(
     weave, page_as, api
 ):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     root1 = data["roots"][0]
     victim = data["nodes"][data["nodes"][root1]["children"][0]]  # kids[0]: deep subtree
     doomed = descendants(data, victim["id"])
     assert len(doomed) >= 4
-    # clement's seeded cursor sits on the victim; park claude's deep inside too
-    assert data["cursors"]["clement"]["node_id"] == victim["id"]
+    # uitest-clement's seeded cursor sits on the victim; park uitest-claude's deep inside too
+    assert data["cursors"]["uitest-clement"]["node_id"] == victim["id"]
     deep_leaf = [n for n in doomed if not data["nodes"][n]["children"]][0]
     api.put(
-        f"/weaves/{weave}/cursors/claude",
-        json={"node_id": deep_leaf, "moved_by": "claude"},
+        f"/weaves/{weave}/cursors/uitest-claude",
+        json={"node_id": deep_leaf, "moved_by": "uitest-claude"},
     ).raise_for_status()
 
     fit_weave(page)
@@ -368,13 +368,13 @@ def test_toolbar_delete_removes_subtree_and_relocates_stranded_cursors(
     for nid in doomed:
         assert nid not in after["nodes"], f"descendant {nid} survived the delete"
     # stranded cursors relocate to the deleted node's parent (store.remove_node)
-    assert after["cursors"]["clement"]["node_id"] == root1
-    assert after["cursors"]["claude"]["node_id"] == root1
+    assert after["cursors"]["uitest-clement"]["node_id"] == root1
+    assert after["cursors"]["uitest-claude"]["node_id"] == root1
     expect(card_locator(page, victim)).to_have_count(0)
 
 
 def test_toolbar_collapse_stub_peek_and_expand(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     root1 = data["roots"][0]
     target = data["nodes"][data["nodes"][root1]["children"][0]]  # kids[0]
@@ -425,10 +425,10 @@ def strip_point(page, card, frac=0.75):
 
 
 def test_strip_hover_reveals_plus_and_click_generates(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     target = data["nodes"][data["nodes"][data["roots"][1]]["children"][0]]  # leaf
-    cursor_before = data["cursors"]["clement"]["node_id"]
+    cursor_before = data["cursors"]["uitest-clement"]["node_id"]
 
     fit_weave(page)
     card = locate_card(page, target)
@@ -449,11 +449,11 @@ def test_strip_hover_reveals_plus_and_click_generates(weave, page_as, api):
     assert len(new_children) >= 1
     # plain click on + does NOT move my cursor
     page.wait_for_timeout(500)
-    assert cursor_node(api, weave, "clement") == cursor_before
+    assert cursor_node(api, weave, "uitest-clement") == cursor_before
 
 
 def test_strip_ctrl_click_and_middle_click_also_move_cursor(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     root1, root2 = data["roots"]
     t_ctrl = data["nodes"][data["nodes"][root2]["children"][1]]  # leaf
@@ -475,7 +475,7 @@ def test_strip_ctrl_click_and_middle_click_also_move_cursor(weave, page_as, api)
     )
     poll_until(
         page,
-        lambda: cursor_node(api, weave, "clement") in new_ctrl,
+        lambda: cursor_node(api, weave, "uitest-clement") in new_ctrl,
         "ctrl+click + to also move my cursor to a generated child (API)",
     )
 
@@ -493,7 +493,7 @@ def test_strip_ctrl_click_and_middle_click_also_move_cursor(weave, page_as, api)
     )
     poll_until(
         page,
-        lambda: cursor_node(api, weave, "clement") in new_mid,
+        lambda: cursor_node(api, weave, "uitest-clement") in new_mid,
         "middle-click + to also move my cursor to a generated child (API)",
     )
 
@@ -503,23 +503,23 @@ def test_cursor_pill_does_not_swallow_clicks_on_card_above(weave, page_as, api):
     pill overlaps the bottom 7px of the card above. The pill is an indicator, not
     a control — clicking the visible body of the upper card must still move my
     cursor there (KNOWN-BUG candidate: a painted pill rect intercepts the click)."""
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     root1 = data["roots"][0]
     kids0 = data["nodes"][root1]["children"][0]
     gk0 = data["nodes"][kids0]["children"][0]
     upper_id, lower_id = data["nodes"][gk0]["children"][:2]  # adjacent depth-3 leaves
 
-    # park claude's cursor on the LOWER card -> its pill overlaps the upper card
+    # park uitest-claude's cursor on the LOWER card -> its pill overlaps the upper card
     api.put(
-        f"/weaves/{weave}/cursors/claude",
-        json={"node_id": lower_id, "moved_by": "claude"},
+        f"/weaves/{weave}/cursors/uitest-claude",
+        json={"node_id": lower_id, "moved_by": "uitest-claude"},
     ).raise_for_status()
 
     fit_weave(page)
     lower_card = locate_card(page, data["nodes"][lower_id])
     expect(  # the pill is rendered before we aim at the overlap zone
-        lower_card.locator("text.pill-label").filter(has_text="claude")
+        lower_card.locator("text.pill-label").filter(has_text="uitest-claude")
     ).to_have_count(1)
 
     upper_card = locate_card(page, data["nodes"][upper_id])
@@ -530,7 +530,7 @@ def test_cursor_pill_does_not_swallow_clicks_on_card_above(weave, page_as, api):
 
     poll_until(
         page,
-        lambda: cursor_node(api, weave, "clement") == upper_id,
+        lambda: cursor_node(api, weave, "uitest-clement") == upper_id,
         "clicking inside the upper card's body to move my cursor there "
         "(a cursor pill on the card below must not swallow the click)",
     )
@@ -540,10 +540,10 @@ def test_cursor_pill_does_not_swallow_clicks_on_card_above(weave, page_as, api):
 
 
 def test_right_click_opens_context_menu(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     target = data["nodes"][data["roots"][1]]
-    cursor_before = data["cursors"]["clement"]["node_id"]
+    cursor_before = data["cursors"]["uitest-clement"]["node_id"]
 
     fit_weave(page)
     card_body(locate_card(page, target)).click(button="right")
@@ -551,14 +551,14 @@ def test_right_click_opens_context_menu(weave, page_as, api):
 
     # right-click must not act as a left click (no cursor move)
     page.wait_for_timeout(600)
-    assert cursor_node(api, weave, "clement") == cursor_before
+    assert cursor_node(api, weave, "uitest-clement") == cursor_before
 
 
 # ================================================================ fit commands
 
 
 def test_fit_weave_and_fit_cursor_buttons(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     cb = canvas_box(page)
 
@@ -590,7 +590,7 @@ def test_fit_weave_and_fit_cursor_buttons(weave, page_as, api):
     page.wait_for_timeout(200)
     _, _, s_cur = transform_of(page)
     assert 0.7 <= s_cur <= 1.0, f"fit-cursor should zoom near native (0.9), got {s_cur}"
-    cur_node = data["nodes"][data["cursors"]["clement"]["node_id"]]
+    cur_node = data["nodes"][data["cursors"]["uitest-clement"]["node_id"]]
     bb = locate_card(page, cur_node).locator("rect.bg").bounding_box()
     ccx, ccy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
     assert abs(ccx - (cb["x"] + cb["width"] / 2)) < 15, "cursor card not centered (x)"
@@ -601,7 +601,7 @@ def test_fit_weave_and_fit_cursor_buttons(weave, page_as, api):
 
 
 def test_remote_node_add_never_moves_view_under_my_pointer(weave, page_as, api):
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     data = weave_json(api, weave)
     n0 = len(data["nodes"])
     cb = canvas_box(page)
@@ -614,9 +614,9 @@ def test_remote_node_add_never_moves_view_under_my_pointer(weave, page_as, api):
     api.post(
         f"/weaves/{weave}/nodes",
         json={
-            "text": "remote interjection while clement hovers",
+            "text": "remote interjection while uitest-clement hovers",
             "parent_id": data["roots"][0],
-            "creator": {"type": "human", "label": "claude"},
+            "creator": {"type": "human", "label": "uitest-claude"},
         },
     ).raise_for_status()
 
@@ -636,7 +636,7 @@ def test_remote_node_add_never_moves_view_under_my_pointer(weave, page_as, api):
         json={
             "text": "second remote interjection, pointer is away",
             "parent_id": data["roots"][1],
-            "creator": {"type": "human", "label": "claude"},
+            "creator": {"type": "human", "label": "uitest-claude"},
         },
     ).raise_for_status()
     expect(page.locator("footer")).to_contain_text(f"{n0 + 2} nodes")

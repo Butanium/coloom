@@ -7,8 +7,8 @@ Every mutation triggered through the DOM is verified through the REST API, and
 API-side mutations are verified to reach the DOM via the WS-driven refetch.
 
 Seeded weave topology (scripts/seed_dev_weave.py):
-  root1 "The loom hummed…"  -> kids[0] (bookmarked, clement cursor), kids[1], kids[2]
-    kids[0] -> 3 grandkids; grandkids[0] -> 2 deep (claude cursor on one)
+  root1 "The loom hummed…"  -> kids[0] (bookmarked, uitest-clement cursor), kids[1], kids[2]
+    kids[0] -> 3 grandkids; grandkids[0] -> 2 deep (uitest-claude cursor on one)
     kids[2] was split (head 3 tokens -> tail) -> human interjection node
   root2 "Chapter 2…" -> 2 children
 """
@@ -112,7 +112,7 @@ def add_single_token_node(api, wid: str, parent_id: str, p: float = 0.9) -> dict
                 "tokens": [{"text": " hi", "logprob": math.log(p), "top_logprobs": []}],
             },
             "parent_id": parent_id,
-            "creator": {"type": "human", "label": "clement"},
+            "creator": {"type": "human", "label": "uitest-clement"},
         },
     )
     r.raise_for_status()
@@ -126,7 +126,7 @@ def test_tree_rows_indentation_and_default_window(page_as, api, weave):
     """Cursor on kids[0] (parent is a root => no grandparent): the window falls
     back to ALL roots; every node renders, indented by depth (4 + 14*depth)."""
     w, root1, root2, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
 
     def all_rows():
@@ -157,14 +157,14 @@ def test_windowing_recenters_and_show_parents_reroots_without_cursor_move(
     """Deep cursor => window re-roots at the cursor's parent; 'show parents'
     re-roots the VIEW up one level and must NOT move my cursor (coloom delta)."""
     _, root1, root2, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
 
     # move my cursor (server-side) onto grandkids[0] (which has children):
     # window should become [kids[0]] — root rows leave the view via WS refetch
     api.put(
-        f"/weaves/{weave}/cursors/clement",
-        json={"node_id": grandkids[0], "moved_by": "clement"},
+        f"/weaves/{weave}/cursors/uitest-clement",
+        json={"node_id": grandkids[0], "moved_by": "uitest-clement"},
     ).raise_for_status()
     wait_until(lambda: row(page, root1).count() == 0, msg="root1 leaves the window")
     assert row(page, root2).count() == 0
@@ -177,7 +177,7 @@ def test_windowing_recenters_and_show_parents_reroots_without_cursor_move(
     show_parents.click()
     wait_until(lambda: row(page, root1).count() == 1, msg="view re-rooted up to root1")
     # the gesture is view-only: my cursor must not have moved
-    cur = get_cursors(api, weave)["clement"]
+    cur = get_cursors(api, weave)["uitest-clement"]
     assert cur["node_id"] == grandkids[0], "'show parents' must not move my cursor"
     # re-rooted at root1 => root1 has no parent => the pseudo-row disappears
     assert sidebar(page).locator("button.pseudo", has_text="show parents").count() == 0
@@ -185,18 +185,18 @@ def test_windowing_recenters_and_show_parents_reroots_without_cursor_move(
 
 def test_click_row_moves_my_cursor_and_dom_reflects_it(page_as, api, weave):
     _, root1, root2, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
 
     target = row(page, kids[1])
     # click the label, not dead center (center may sit over the hover strip)
     target.locator(".label").click()
     def cursor_on_target():
-        c = get_cursors(api, weave)["clement"]
+        c = get_cursors(api, weave)["uitest-clement"]
         return c if c["node_id"] == kids[1] else None
 
-    cur = wait_until(cursor_on_target, msg="clement cursor moved to clicked row")
-    assert cur["moved_by"] == "clement"
+    cur = wait_until(cursor_on_target, msg="uitest-clement cursor moved to clicked row")
+    assert cur["moved_by"] == "uitest-clement"
     # DOM follows: the row gains the is-cursor stroke class
     wait_until(
         lambda: "is-cursor" in (row(page, kids[1]).get_attribute("class") or ""),
@@ -207,9 +207,9 @@ def test_click_row_moves_my_cursor_and_dom_reflects_it(page_as, api, weave):
 
 def test_right_click_opens_context_menu_without_moving_cursor(page_as, api, weave):
     _, _, _, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
-    before = get_cursors(api, weave)["clement"]["node_id"]
+    before = get_cursors(api, weave)["uitest-clement"]["node_id"]
 
     row(page, kids[1]).click(button="right")
     menu = page.locator('.menu[role="menu"]')
@@ -221,7 +221,7 @@ def test_right_click_opens_context_menu_without_moving_cursor(page_as, api, weav
 
     page.keyboard.press("Escape")
     wait_until(lambda: page.locator('.menu[role="menu"]').count() == 0, msg="menu closes")
-    assert get_cursors(api, weave)["clement"]["node_id"] == before, (
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == before, (
         "right-click must not move my cursor"
     )
 
@@ -230,11 +230,11 @@ def test_collapse_triangle_toggles_subtree_and_does_not_move_cursor(
     page_as, api, weave
 ):
     w, _, _, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     subtree_kids = w["nodes"][kids[1]]["children"]
     assert len(subtree_kids) == 2
-    before_cursor = get_cursors(api, weave)["clement"]["node_id"]
+    before_cursor = get_cursors(api, weave)["uitest-clement"]["node_id"]
 
     for child in subtree_kids:
         assert row(page, child).count() == 1, "subtree starts expanded"
@@ -248,7 +248,7 @@ def test_collapse_triangle_toggles_subtree_and_does_not_move_cursor(
     )
     assert row(page, kids[1]).count() == 1, "the collapsed row itself stays"
     # triangle click is collapse-only — not a row activation
-    assert get_cursors(api, weave)["clement"]["node_id"] == before_cursor
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == before_cursor
 
     row(page, kids[1]).locator("button.tri").click()
     wait_until(
@@ -264,10 +264,10 @@ def test_strip_generate_plain_click_adds_children_without_cursor_move(
     page_as, api, weave
 ):
     w, _, _, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     leaf = w["nodes"][kids[1]]["children"][0]  # a depth-2 leaf
-    before_cursor = get_cursors(api, weave)["clement"]["node_id"]
+    before_cursor = get_cursors(api, weave)["uitest-clement"]["node_id"]
 
     r = row(page, leaf)
     # passive info only until hovered; the strip must appear on hover
@@ -283,7 +283,7 @@ def test_strip_generate_plain_click_adds_children_without_cursor_move(
     )
     assert len(children) >= 1
     # plain click never moves my cursor
-    assert get_cursors(api, weave)["clement"]["node_id"] == before_cursor
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == before_cursor
     # and the new rows show up in the tree via the WS refetch
     wait_until(
         lambda: all(row(page, c).count() == 1 for c in children),
@@ -293,7 +293,7 @@ def test_strip_generate_plain_click_adds_children_without_cursor_move(
 
 def test_strip_generate_ctrl_click_also_moves_my_cursor(page_as, api, weave):
     _, _, _, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     leaf = grandkids[1]  # bookmarked leaf under kids[0]
 
@@ -305,7 +305,7 @@ def test_strip_generate_ctrl_click_also_moves_my_cursor(page_as, api, weave):
         msg="ctrl-click generation produced children (API)",
     )
     def cursor_in_children():
-        c = get_cursors(api, weave)["clement"]
+        c = get_cursors(api, weave)["uitest-clement"]
         return c if c["node_id"] in children else None
 
     cur = wait_until(cursor_in_children, msg="cursor followed the generation")
@@ -314,7 +314,7 @@ def test_strip_generate_ctrl_click_also_moves_my_cursor(page_as, api, weave):
 
 def test_strip_generate_middle_click_also_moves_my_cursor(page_as, api, weave):
     _, _, _, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     leaf = grandkids[2]
 
@@ -325,15 +325,15 @@ def test_strip_generate_middle_click_also_moves_my_cursor(page_as, api, weave):
         lambda: get_weave(api, weave)["nodes"][leaf]["children"] or None,
         msg="middle-click generation produced children (API)",
     )
-    assert get_cursors(api, weave)["clement"]["node_id"] == children[0]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == children[0]
 
 
 def test_strip_add_child_creates_empty_human_node(page_as, api, weave):
     _, _, root2, _, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     before = set(get_weave(api, weave)["nodes"][root2]["children"])
-    before_cursor = get_cursors(api, weave)["clement"]["node_id"]
+    before_cursor = get_cursors(api, weave)["uitest-clement"]["node_id"]
 
     r = row(page, root2)
     r.hover()
@@ -350,16 +350,16 @@ def test_strip_add_child_creates_empty_human_node(page_as, api, weave):
     assert len(new) == 1
     node = get_weave(api, weave)["nodes"][new[0]]
     assert node["creator"]["type"] == "human"
-    assert node["creator"]["label"] == "clement", "child is attributed to MY identity"
+    assert node["creator"]["label"] == "uitest-clement", "child is attributed to MY identity"
     assert node_text(node) == ""
     # plain add-child does not move my cursor
-    assert get_cursors(api, weave)["clement"]["node_id"] == before_cursor
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == before_cursor
     wait_until(lambda: row(page, new[0]).count() == 1, msg="new child row rendered")
 
 
 def test_strip_bookmark_toggle_roundtrip_with_passive_star(page_as, api, weave):
     _, _, _, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     target = kids[1]
     assert not get_weave(api, weave)["nodes"][target]["bookmarked"]
@@ -394,7 +394,7 @@ def test_strip_bookmark_toggle_roundtrip_with_passive_star(page_as, api, weave):
 
 def test_strip_delete_removes_subtree_and_row(page_as, api, weave):
     w, _, root2, _, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     victim = w["nodes"][root2]["children"][0]
 
@@ -412,9 +412,9 @@ def test_delete_my_cursor_node_relocates_cursor_to_parent(page_as, api, weave):
     """Deleting the node my cursor sits on must fall the cursor back to the
     deleted node's parent (server-side rule, spec lists.md §10)."""
     _, root1, _, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
-    assert get_cursors(api, weave)["clement"]["node_id"] == kids[0]
+    assert get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[0]
 
     r = row(page, kids[0])
     r.hover()
@@ -424,8 +424,8 @@ def test_delete_my_cursor_node_relocates_cursor_to_parent(page_as, api, weave):
         msg="cursor node deleted (API)",
     )
     cur = wait_until(
-        lambda: get_cursors(api, weave).get("clement"),
-        msg="clement cursor survives the delete",
+        lambda: get_cursors(api, weave).get("uitest-clement"),
+        msg="uitest-clement cursor survives the delete",
     )
     assert cur["node_id"] == root1, "cursor falls back to the deleted node's parent"
     wait_until(
@@ -440,7 +440,7 @@ def test_delete_my_cursor_node_relocates_cursor_to_parent(page_as, api, weave):
 def test_passive_single_token_probability_and_bookmark_star(page_as, api, weave):
     _, _, root2, kids, _ = topology(api, weave)
     single = add_single_token_node(api, weave, root2, p=0.9)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     park_mouse(page)
 
@@ -464,12 +464,12 @@ def test_passive_single_token_probability_and_bookmark_star(page_as, api, weave)
 
 def test_cursor_dots_mark_participant_rows(page_as, api, weave):
     _, _, _, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
-    claude_node = get_cursors(api, weave)["claude"]["node_id"]
+    claude_node = get_cursors(api, weave)["uitest-claude"]["node_id"]
 
-    assert row(page, kids[0]).locator('.cdot[title="clement"]').count() == 1
-    assert row(page, claude_node).locator('.cdot[title="claude"]').count() == 1
+    assert row(page, kids[0]).locator('.cdot[title="uitest-clement"]').count() == 1
+    assert row(page, claude_node).locator('.cdot[title="uitest-claude"]').count() == 1
     # no stray dots elsewhere
     assert sidebar(page).locator(".cdot").count() == 2
 
@@ -479,7 +479,7 @@ def test_cursor_dots_mark_participant_rows(page_as, api, weave):
 
 def test_search_filters_click_moves_cursor_and_clear_restores(page_as, api, weave):
     w, root1, root2, kids, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
 
     page.fill("[data-search-input]", "Chapter 2")
@@ -492,7 +492,7 @@ def test_search_filters_click_moves_cursor_and_clear_restores(page_as, api, weav
 
     match.locator(".label").click()
     wait_until(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == root2,
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == root2,
         msg="clicking a match moves my cursor (API)",
     )
 
@@ -518,7 +518,7 @@ def test_search_filters_click_moves_cursor_and_clear_restores(page_as, api, weav
 
 def test_children_tab_shows_parent_row_and_children_of_my_cursor(page_as, api, weave):
     _, root1, _, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "children")
 
     heading = sidebar(page).locator(".heading")
@@ -538,13 +538,13 @@ def test_children_tab_shows_parent_row_and_children_of_my_cursor(page_as, api, w
 
 def test_children_tab_click_child_descends_and_parent_row_ascends(page_as, api, weave):
     _, root1, _, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "children")
     leaf = grandkids[1]  # childless
 
     row(page, leaf).locator(".label").click()
     wait_until(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == leaf,
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == leaf,
         msg="clicking a child moves my cursor down (API)",
     )
     # list re-derives: parent row is now kids[0], and the leaf has no children
@@ -556,7 +556,7 @@ def test_children_tab_click_child_descends_and_parent_row_ascends(page_as, api, 
 
     row(page, kids[0]).locator(".label").click()
     wait_until(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == kids[0],
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == kids[0],
         msg="clicking the parent row moves my cursor up (API)",
     )
     wait_until(
@@ -568,7 +568,7 @@ def test_children_tab_click_child_descends_and_parent_row_ascends(page_as, api, 
 def test_children_tab_strip_actions_work_too(page_as, api, weave):
     """The flat list rows carry the same action strip — exercise add-child."""
     _, root1, _, kids, grandkids = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "children")
     target = grandkids[0]
     before = set(get_weave(api, weave)["nodes"][target]["children"])
@@ -589,7 +589,7 @@ def test_children_tab_strip_actions_work_too(page_as, api, weave):
         msg="flat-list add-child created a node (API)",
     )
     wait_until(
-        lambda: get_cursors(api, weave)["clement"]["node_id"] == new[0],
+        lambda: get_cursors(api, weave)["uitest-clement"]["node_id"] == new[0],
         msg="ctrl-click add-child moved my cursor to the new node",
     )
 
@@ -599,7 +599,7 @@ def test_children_tab_strip_actions_work_too(page_as, api, weave):
 
 def test_hover_tree_row_highlights_matching_canvas_card(page_as, api, weave):
     _, root1, root2, _, _ = topology(api, weave)
-    page = page_as("clement", weave)
+    page = page_as("uitest-clement", weave)
     select_tab(page, "tree")
     # make sure the canvas shows every card (hover sync needs the card mounted)
     page.locator('button[title^="fit whole weave"]').click()

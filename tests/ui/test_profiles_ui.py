@@ -1,7 +1,7 @@
 """Profiles: login gate, profile-scoped roaming settings, switch/delete flows.
 
 Profiles are SERVER-GLOBAL; tests use uniquely-named profiles and delete them
-in finally blocks (page_as profiles like 'clement' are reset by the fixture).
+in finally blocks (page_as profiles like 'uitest-clement' are reset by the fixture).
 """
 
 import os
