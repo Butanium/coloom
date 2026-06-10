@@ -149,6 +149,38 @@ def test_cli_gen_param_override(capsys, live_server, fake_openai_url):
     assert sent["stop"] == ["\n"]
 
 
+def test_cli_setups_flow(capsys, live_server, fake_openai_url):
+    url, fake_app = fake_openai_url
+    model = run(
+        capsys, live_server, "setups", "model",
+        "--name", "base", "--base-url", url, "--model", "gpt-4-base",
+        "--api-key", "sk-secret", "--param", "temperature=0.8",
+    )
+    assert model["api_key"] == "***"  # redacted in the CLI response too
+    sampler = run(
+        capsys, live_server, "setups", "sampler",
+        "--name", "wild", "--model-setup-id", model["id"],
+        "--param", "temperature=1.3",
+    )
+    listed = run(capsys, live_server, "setups", "list")
+    assert [m["id"] for m in listed["models"]] == [model["id"]]
+    assert [s["id"] for s in listed["samplers"]] == [sampler["id"]]
+
+    # gen with --sampler routes through the model setup and sampler overrides
+    created = run(capsys, live_server, "new", "--text", "seed")
+    wid = created["weave"]["id"]
+    run(
+        capsys, live_server, "--weave", wid,
+        "gen", "--node", created["root"]["id"], "--sampler", sampler["id"],
+    )
+    assert fake_app.state.received[-1]["temperature"] == 1.3
+
+    # delete order: sampler first (model is referenced -> 409)
+    run(capsys, live_server, "setups", "rm-sampler", sampler["id"])
+    run(capsys, live_server, "setups", "rm-model", model["id"])
+    assert run(capsys, live_server, "setups", "list") == {"models": [], "samplers": []}
+
+
 def test_cli_errors_exit_nonzero(capsys, live_server):
     with pytest.raises(SystemExit) as exc:
         main(["--server", live_server, "read"])  # no weave id
@@ -159,3 +191,51 @@ def test_cli_errors_exit_nonzero(capsys, live_server):
         main(["--server", live_server, "--weave", "nope", "read"])
     assert exc.value.code == 1
     assert "404" in capsys.readouterr().err
+
+
+def test_profile_login_defaults_cursor_and_creator(capsys, live_server, tmp_path, monkeypatch):
+    """`profile login` persists; --cursor and --as then default to the profile,
+    so CLI weaving is attributed like web weaving."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("COLOOM_CURSOR", raising=False)
+    monkeypatch.delenv("COLOOM_PROFILE", raising=False)
+    # PROFILE_FILE is computed at import time — repoint it for this test
+    import coloom.cli as cli_mod
+    monkeypatch.setattr(
+        cli_mod, "PROFILE_FILE", tmp_path / "coloom" / "profile"
+    )
+
+    assert run(capsys, live_server, "profile", "whoami") == {"profile": None}
+    logged = run(capsys, live_server, "profile", "login", "clem-cli")
+    assert logged["logged_in"] == "clem-cli"
+    assert run(capsys, live_server, "profile", "whoami") == {"profile": "clem-cli"}
+    assert any(
+        p["name"] == "clem-cli"
+        for p in run(capsys, live_server, "profile", "list")
+    )
+
+    # cursor + creator label now default to the profile
+    created = run(capsys, live_server, "new", "--title", "p", "--text", "root")
+    assert created["root"]["creator"]["label"] == "clem-cli"
+    wid = created["weave"]["id"]
+    cursors = run(capsys, live_server, "--weave", wid, "cursor", "list")
+    assert "clem-cli" in cursors
+
+    # login again must NOT wipe existing settings
+    import httpx as _httpx
+    _httpx.put(
+        f"{live_server}/profiles/clem-cli",
+        json={"settings": {"keep": True}},
+        timeout=5,
+    )
+    logged = run(capsys, live_server, "profile", "login", "clem-cli")
+    assert logged["settings"] == {"keep": True}
+
+    # explicit flag still beats the profile
+    created = run(
+        capsys, live_server, "new", "--title", "q", "--text", "r", "--as", "other"
+    )
+    assert created["root"]["creator"]["label"] == "other"
+
+    run(capsys, live_server, "profile", "logout")
+    assert run(capsys, live_server, "profile", "whoami") == {"profile": None}

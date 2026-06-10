@@ -171,6 +171,85 @@ def test_gen_unknown_preset_is_400(client):
     assert resp.status_code == 400
 
 
+def test_add_node_with_typed_content(client):
+    """Counterfactual branches POST full Tokens content, not just text."""
+    wid = make_weave(client)
+    root = add(client, wid, "x")
+    resp = client.post(
+        f"/weaves/{wid}/nodes",
+        json={
+            "parent_id": root["id"],
+            "content": {
+                "type": "tokens",
+                "tokens": [
+                    {
+                        "text": " maybe",
+                        "logprob": -1.5,
+                        "token_id": 42,
+                        "top_logprobs": [{"text": " maybe", "logprob": -1.5}],
+                    }
+                ],
+            },
+            "creator": {"type": "model", "label": "gpt-4-base"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    node = resp.json()
+    assert node["content"]["type"] == "tokens"
+    assert node["content"]["tokens"][0]["logprob"] == -1.5
+    fetched = client.get(f"/weaves/{wid}/nodes/{node['id']}").json()
+    assert fetched["content"]["tokens"][0]["token_id"] == 42
+
+
+def test_update_weave(client):
+    wid = make_weave(client)
+    resp = client.patch(
+        f"/weaves/{wid}", json={"description": "notes!", "metadata": {"k": "v"}}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "t"  # unchanged
+    assert body["description"] == "notes!"
+    assert body["metadata"] == {"k": "v"}
+    assert client.patch("/weaves/nope", json={"title": "x"}).status_code == 404
+
+
+def test_gen_emits_presence_events(client):
+    wid = make_weave(client)
+    root = add(client, wid, "x")
+    resp = client.post(
+        f"/weaves/{wid}/gen", json={"node_id": root["id"], "cursor": "claude"}
+    )
+    assert resp.status_code == 201
+    events = client.get(f"/events?weave_id={wid}").json()["events"]
+    types = [e["type"] for e in events]
+    assert "gen_started" in types and "gen_finished" in types
+    started = next(e for e in events if e["type"] == "gen_started")
+    finished = next(e for e in events if e["type"] == "gen_finished")
+    assert started["payload"]["requester"] == "claude"
+    assert started["payload"]["node_id"] == root["id"]
+    assert len(finished["payload"]["node_ids"]) == 2
+    # failure path also closes the indicator
+    client.post(
+        f"/weaves/{wid}/gen",
+        json={"node_id": root["id"], "preset": "dead", "params": {"timeout": 2}},
+    )
+    events = client.get(f"/events?weave_id={wid}").json()["events"]
+    errors = [e for e in events if e["type"] == "gen_finished" and "error" in e["payload"]]
+    assert len(errors) == 1
+
+
+def test_list_presets(client):
+    resp = client.get("/presets")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["default_preset"] == "default"
+    # the "default" preset shadows nothing; raw endpoints are selectable too
+    assert set(body["presets"]) == {"default", "fake", "dead", "keyless"}
+    assert body["presets"]["default"]["model"] == "gpt-4-base"
+    assert body["presets"]["default"]["params"]["n"] == 2  # merged endpoint params
+
+
 def test_gen_unreachable_endpoint_is_502(client):
     wid = make_weave(client)
     root = add(client, wid, "x")

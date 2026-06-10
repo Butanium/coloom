@@ -37,7 +37,7 @@ def test_two_clients_see_each_other_live(capsys, live_server):
     result: dict = {}
 
     def subscriber():
-        result["events"] = asyncio.run(collect_events(ws_url, 4, ready))
+        result["events"] = asyncio.run(collect_events(ws_url, 6, ready))
 
     thread = threading.Thread(target=subscriber)
     thread.start()
@@ -65,8 +65,10 @@ def test_two_clients_see_each_other_live(capsys, live_server):
     assert [e["type"] for e in events] == [
         "node_added",  # A's manual branch
         "cursor_moved",  # --move-cursor
+        "gen_started",  # presence: a generation is in flight
         "node_added",  # gen choice 0
         "node_added",  # gen choice 1
+        "gen_finished",  # presence: generation done
     ]
     node_ids = {e["payload"]["node_id"] for e in events if e["type"] == "node_added"}
     assert added["id"] in node_ids

@@ -33,6 +33,7 @@ from coloom.models import (
     WeaveInfo,
     utcnow,
 )
+from coloom.setups import ModelSetup, SamplerSetup
 from pydantic import TypeAdapter
 
 _CONTENT = TypeAdapter(NodeContent)
@@ -82,6 +83,27 @@ CREATE TABLE IF NOT EXISTS events (
     created  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_weave ON events(weave_id, seq);
+CREATE TABLE IF NOT EXISTS model_setups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    base_url    TEXT NOT NULL,
+    api_key     TEXT,
+    api_key_env TEXT,
+    model       TEXT NOT NULL,
+    params      TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS sampler_setups (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    model_setup_id TEXT NOT NULL,
+    params         TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS profiles (
+    name     TEXT PRIMARY KEY,
+    settings TEXT NOT NULL DEFAULT '{}',
+    created  TEXT NOT NULL,
+    updated  TEXT NOT NULL
+);
 """
 
 
@@ -90,6 +112,13 @@ class WeaveStoreError(Exception):
 
 
 class NotFound(WeaveStoreError):
+    pass
+
+
+class Conflict(WeaveStoreError):
+    """A mutation is blocked by a referential constraint (e.g. deleting a model
+    setup still referenced by a sampler)."""
+
     pass
 
 
@@ -170,6 +199,41 @@ class WeaveStore:
             c.execute("DELETE FROM nodes WHERE weave_id = ?", (weave_id,))
             c.execute("DELETE FROM weaves WHERE id = ?", (weave_id,))
             self._log_event(c, weave_id, "weave_deleted", {})
+
+    def update_weave_info(
+        self,
+        weave_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> WeaveInfo:
+        """Partial update of weave-level fields (None = leave unchanged)."""
+        with self._tx() as c:
+            info = self.get_weave_info(weave_id)
+            if title is not None:
+                info.title = title
+            if description is not None:
+                info.description = description
+            if metadata is not None:
+                info.metadata = metadata
+            c.execute(
+                "UPDATE weaves SET title = ?, description = ?, metadata = ?"
+                " WHERE id = ?",
+                (info.title, info.description, json.dumps(info.metadata), weave_id),
+            )
+            self._log_event(
+                c, weave_id, "weave_updated", {"title": info.title}
+            )
+        return info
+
+    def log_activity(
+        self, weave_id: str, type_: str, payload: dict[str, Any]
+    ) -> None:
+        """Log a non-mutation event into the change feed (e.g. gen_started) —
+        powers presence indicators and the activity timeline."""
+        with self._tx() as c:
+            self.get_weave_info(weave_id)
+            self._log_event(c, weave_id, type_, payload)
 
     def get_weave(self, weave_id: str) -> Weave:
         """Full snapshot: nodes with linked edges, roots, cursors, bookmarks."""
@@ -387,6 +451,42 @@ class WeaveStore:
                 {"node_id": node_id, "bookmarked": bookmarked},
             )
 
+    def update_node_content(
+        self,
+        weave_id: str,
+        node_id: str,
+        content: NodeContent,
+        metadata: dict[str, Any] | None = None,
+    ) -> Node:
+        """Replace a node's content wholesale (free-form thread editing: the
+        keystroke-coalescing path mutates one node instead of chaining new
+        ones). `metadata`, when given, replaces the node's metadata too."""
+        self.get_node(weave_id, node_id)  # validates weave + node
+        with self._tx() as c:
+            if metadata is not None:
+                c.execute(
+                    "UPDATE nodes SET content = ?, metadata = ?, modified = ?"
+                    " WHERE id = ?",
+                    (
+                        content.model_dump_json(),
+                        json.dumps(metadata),
+                        utcnow().isoformat(),
+                        node_id,
+                    ),
+                )
+            else:
+                c.execute(
+                    "UPDATE nodes SET content = ?, modified = ? WHERE id = ?",
+                    (content.model_dump_json(), utcnow().isoformat(), node_id),
+                )
+            self._log_event(
+                c,
+                weave_id,
+                "node_updated",
+                {"node_id": node_id, "content_changed": True},
+            )
+        return self.get_node(weave_id, node_id)
+
     def split_node(self, weave_id: str, node_id: str, at: int) -> tuple[Node, Node]:
         """Split a node's content at `at` (token index for Tokens, char offset for
         Snippet). The original node keeps the head (its id, parents, bookmarks stay);
@@ -545,6 +645,196 @@ class WeaveStore:
             self.get_node(weave_id, node_id)
             path = self._path_to_root(weave_id, node_id)
             return "".join(self.get_node(weave_id, nid).text for nid in path)
+
+    # ------------------------------------------------------------ setups
+
+    def create_model_setup(self, setup: ModelSetup) -> ModelSetup:
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO model_setups (id, name, base_url, api_key, api_key_env,"
+                " model, params) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    setup.id,
+                    setup.name,
+                    setup.base_url,
+                    setup.api_key,
+                    setup.api_key_env,
+                    setup.model,
+                    json.dumps(setup.params),
+                ),
+            )
+        return setup
+
+    def get_model_setup(self, setup_id: str) -> ModelSetup:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM model_setups WHERE id = ?", (setup_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"model setup {setup_id!r} not found")
+        return self._row_to_model_setup(row)
+
+    def list_model_setups(self) -> list[ModelSetup]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM model_setups ORDER BY name, id"
+            ).fetchall()
+        return [self._row_to_model_setup(r) for r in rows]
+
+    def update_model_setup(
+        self, setup_id: str, fields: dict[str, Any]
+    ) -> ModelSetup:
+        """Partial update: only keys present in `fields` change. Re-validates the
+        api_key/api_key_env mutual exclusion on the merged result."""
+        with self._tx() as c:
+            current = self.get_model_setup(setup_id)
+            merged = current.model_copy(update=fields)
+            ModelSetup.model_validate(merged.model_dump())  # re-run validators
+            c.execute(
+                "UPDATE model_setups SET name = ?, base_url = ?, api_key = ?,"
+                " api_key_env = ?, model = ?, params = ? WHERE id = ?",
+                (
+                    merged.name,
+                    merged.base_url,
+                    merged.api_key,
+                    merged.api_key_env,
+                    merged.model,
+                    json.dumps(merged.params),
+                    setup_id,
+                ),
+            )
+        return merged
+
+    def delete_model_setup(self, setup_id: str) -> None:
+        with self._tx() as c:
+            self.get_model_setup(setup_id)
+            (refs,) = c.execute(
+                "SELECT COUNT(*) FROM sampler_setups WHERE model_setup_id = ?",
+                (setup_id,),
+            ).fetchone()
+            if refs:
+                raise Conflict(
+                    f"model setup {setup_id!r} is referenced by {refs} sampler(s)"
+                )
+            c.execute("DELETE FROM model_setups WHERE id = ?", (setup_id,))
+
+    def create_sampler_setup(self, setup: SamplerSetup) -> SamplerSetup:
+        with self._tx() as c:
+            self.get_model_setup(setup.model_setup_id)  # validate the reference
+            c.execute(
+                "INSERT INTO sampler_setups (id, name, model_setup_id, params)"
+                " VALUES (?, ?, ?, ?)",
+                (
+                    setup.id,
+                    setup.name,
+                    setup.model_setup_id,
+                    json.dumps(setup.params),
+                ),
+            )
+        return setup
+
+    def get_sampler_setup(self, setup_id: str) -> SamplerSetup:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sampler_setups WHERE id = ?", (setup_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"sampler setup {setup_id!r} not found")
+        return self._row_to_sampler_setup(row)
+
+    def list_sampler_setups(self) -> list[SamplerSetup]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM sampler_setups ORDER BY name, id"
+            ).fetchall()
+        return [self._row_to_sampler_setup(r) for r in rows]
+
+    def update_sampler_setup(
+        self, setup_id: str, fields: dict[str, Any]
+    ) -> SamplerSetup:
+        with self._tx() as c:
+            current = self.get_sampler_setup(setup_id)
+            merged = current.model_copy(update=fields)
+            if "model_setup_id" in fields:
+                self.get_model_setup(merged.model_setup_id)  # validate the reference
+            c.execute(
+                "UPDATE sampler_setups SET name = ?, model_setup_id = ?, params = ?"
+                " WHERE id = ?",
+                (
+                    merged.name,
+                    merged.model_setup_id,
+                    json.dumps(merged.params),
+                    setup_id,
+                ),
+            )
+        return merged
+
+    def delete_sampler_setup(self, setup_id: str) -> None:
+        with self._tx() as c:
+            self.get_sampler_setup(setup_id)
+            c.execute("DELETE FROM sampler_setups WHERE id = ?", (setup_id,))
+
+    @staticmethod
+    def _row_to_model_setup(row: sqlite3.Row) -> ModelSetup:
+        return ModelSetup(
+            id=row["id"],
+            name=row["name"],
+            base_url=row["base_url"],
+            api_key=row["api_key"],
+            api_key_env=row["api_key_env"],
+            model=row["model"],
+            params=json.loads(row["params"]),
+        )
+
+    @staticmethod
+    def _row_to_sampler_setup(row: sqlite3.Row) -> SamplerSetup:
+        return SamplerSetup(
+            id=row["id"],
+            name=row["name"],
+            model_setup_id=row["model_setup_id"],
+            params=json.loads(row["params"]),
+        )
+
+    # ------------------------------------------------------------ profiles
+    # Server-stored per-person client settings (keybindings, ui prefs, active
+    # generators…) so a profile roams across browsers. Opaque JSON blob.
+
+    def list_profiles(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT name, updated FROM profiles ORDER BY name"
+        ).fetchall()
+        return [{"name": r["name"], "updated": r["updated"]} for r in rows]
+
+    def get_profile(self, name: str) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT name, settings, created, updated FROM profiles WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"profile {name!r} not found")
+        return {
+            "name": row["name"],
+            "settings": json.loads(row["settings"]),
+            "created": row["created"],
+            "updated": row["updated"],
+        }
+
+    def put_profile(self, name: str, settings: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow().isoformat()
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO profiles (name, settings, created, updated)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (name) DO UPDATE"
+                " SET settings = excluded.settings, updated = excluded.updated",
+                (name, json.dumps(settings), now, now),
+            )
+        return self.get_profile(name)
+
+    def delete_profile(self, name: str) -> None:
+        with self._tx() as c:
+            self.get_profile(name)
+            c.execute("DELETE FROM profiles WHERE name = ?", (name,))
 
     # ------------------------------------------------------------ events
 

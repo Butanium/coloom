@@ -18,6 +18,9 @@ node_modules/
 dist/
 .vite/
 
+# Local server config (coloom.example.yaml is the tracked template)
+/coloom.yaml
+
 # Data / local weave stores
 *.sqlite
 *.sqlite3

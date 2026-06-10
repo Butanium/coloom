@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 coloom = "coloom.cli:main"
 coloom-server = "coloom.server.__main__:main"
+coloom-fake-openai = "coloom.fake_openai:main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]
@@ -26,8 +27,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "playwright>=1.60.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
+    "pytest-playwright>=0.8.0",
     "pytest-timeout>=2.4.0",
     "ruff>=0.15.15",
 ]

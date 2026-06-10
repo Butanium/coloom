@@ -35,6 +35,9 @@ class Token(BaseModel):
     token_id: int | None = None
     entropy: float | None = None
     top_logprobs: list[TopLogprob] = Field(default_factory=list)
+    # logprob carried over from a different prefix context (e.g. the preserved
+    # tail of an edited thread): still useful for shading, but no longer exact
+    inexact: bool = False
 
 
 class Snippet(BaseModel):

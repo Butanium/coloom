@@ -31,18 +31,21 @@ class EndpointConfig(BaseModel):
     base_url: str  # e.g. "https://api.openai.com/v1"
     model: str
     kind: str = "completions"  # "chat" later
+    api_key: str | None = None  # literal bearer key (e.g. from a model setup)
     api_key_env: str | None = None  # env var holding the key; never the key itself
     headers: dict[str, str] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=lambda: dict(DEFAULT_PARAMS))
 
     def resolve_headers(self) -> dict[str, str]:
         headers = dict(self.headers)
-        if self.api_key_env:
+        key = self.api_key
+        if key is None and self.api_key_env:
             key = os.environ.get(self.api_key_env)
             if not key:
                 raise ConfigError(
                     f"endpoint {self.model!r}: env var {self.api_key_env!r} is not set"
                 )
+        if key:
             headers.setdefault("Authorization", f"Bearer {key}")
         return headers
 
