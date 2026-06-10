@@ -142,8 +142,8 @@
           >
         {/each}
         <div class="spacer"></div>
-        <button onclick={() => sendViewCommand('fit-cursor')} title="center on my cursor (ctrl+9)">⌖ cursor</button>
-        <button onclick={() => sendViewCommand('fit-weave')} title="fit whole weave (ctrl+0)">⛶ weave</button>
+        <button onclick={() => sendViewCommand('fit-cursor')} title="center on my cursor (ctrl+9)">→ cursor</button>
+        <button onclick={() => sendViewCommand('fit-weave')} title="fit whole weave (ctrl+0)">fit weave</button>
       </nav>
       <div class="center-body">
         {#if ui.centerTab === 'canvas'}

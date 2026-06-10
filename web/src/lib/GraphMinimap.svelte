@@ -408,7 +408,7 @@
         <span style:color={creatorTextColor(tipNode.creator)}>{creatorLabel(tipNode.creator)}</span>
         {#if tipNode.bookmarked}<span class="tip-mark">⚑</span>{/if}
         {#each tipCursors as name (name)}
-          <span class="tip-cursor" style:color={cursorColor(name)}>⌖ {name}</span>
+          <span class="tip-cursor" style:color={cursorColor(name)}>@{name}</span>
         {/each}
       </div>
       {#if tipExcerpt}
