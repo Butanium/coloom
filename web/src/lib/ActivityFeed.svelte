@@ -139,7 +139,24 @@
     }
   }
 
-  const entries = $derived(session.events.slice(-RENDER_CAP).map(describe).reverse())
+  // Plain navigation spams cursor_moved; show a move only when it immediately
+  // precedes a real (non-cursor) event — "where they went to do that". Summons
+  // (A moved B's cursor) are deliberate gestures and always show. The newest
+  // moves stay hidden until a real action lands (reactive: kept retroactively).
+  function keepEvent(e: WeaveEvent, next: WeaveEvent | undefined): boolean {
+    if (e.type !== 'cursor_moved') return true
+    const movedBy = (e.payload.moved_by as string | null | undefined) ?? null
+    if (movedBy !== null && movedBy !== e.payload.name) return true // summon
+    return next !== undefined && next.type !== 'cursor_moved'
+  }
+
+  const entries = $derived(
+    session.events
+      .filter((e, i, evs) => keepEvent(e, evs[i + 1]))
+      .slice(-RENDER_CAP)
+      .map(describe)
+      .reverse(),
+  )
 
   // ticking clock for relative timestamps
   let now = $state(Date.now())

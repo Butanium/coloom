@@ -18,9 +18,11 @@
 </script>
 
 <script lang="ts">
-  // Two-layer inference setups manager (docs/setups-api.md). Model setups carry
-  // an endpoint + arbitrary default API flags; sampler setups reference a model
-  // and override params. Server-global state — every mutation refetches /setups.
+  // Two-layer inference setups manager (docs/setups-api.md), docked as a
+  // NON-MODAL bottom drawer: chips row and canvas stay live while editing.
+  // Model setups carry an endpoint + arbitrary default API flags; sampler
+  // setups reference a model and override params. Server-global state — every
+  // mutation refetches /setups. Open/closed persists per profile (GenControls).
   import { api } from './api'
   import ParamsEditor, {
     paramsFromRows,
@@ -275,20 +277,14 @@
 
 <svelte:window {onkeydown} />
 
-<div
-  class="overlay"
-  role="presentation"
-  onclick={(e) => {
-    if (e.target === e.currentTarget) onclose()
-  }}
->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="inference setups">
-    <header>
-      <h2>inference setups</h2>
-      <button class="x" onclick={onclose} aria-label="close">×</button>
-    </header>
+<div class="drawer" role="dialog" aria-label="inference setups" data-testid="setups-drawer">
+  <header>
+    <h2>inference setups</h2>
+    <span class="drawer-hint">non-modal — the weave stays live behind</span>
+    <button class="collapse" onclick={onclose} data-testid="setups-collapse">collapse ▾</button>
+  </header>
 
-    <div class="cols">
+  <div class="cols">
       <!-- models -->
       <section class="col">
         <h3>model setups</h3>
@@ -301,7 +297,7 @@
               </div>
               <div class="row-sub">
                 <span class="url">{m.base_url}</span>
-                {#if m.api_key === '***'}<span class="key" title="api_key set">🔑</span>{/if}
+                {#if m.api_key === '***'}<span class="key" title="api_key set">[key]</span>{/if}
                 {#if m.api_key_env}<span class="key" title="from env">${m.api_key_env}</span>{/if}
               </div>
               <div class="actions">
@@ -397,34 +393,30 @@
           {/if}
         </div>
       </section>
-    </div>
   </div>
 </div>
 
 <style>
-  .overlay {
+  .drawer {
+    /* docked, non-modal: no backdrop — the editor stays interactive above */
     position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-  .dialog {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: min(44vh, 30rem);
     background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    width: min(900px, 94vw);
-    max-height: 88vh;
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    z-index: 40; /* above pane content, below dropdown menus (50) and dialogs (100) */
   }
   header {
     display: flex;
     align-items: center;
-    padding: 0.6rem 0.9rem;
+    gap: 0.6rem;
+    padding: 0.45rem 0.9rem;
     border-bottom: 1px solid var(--border);
   }
   header h2 {
@@ -432,23 +424,23 @@
     font-size: var(--fs-ui);
     font-weight: 600;
   }
-  .x {
-    margin-left: auto;
-    font-size: 1.1rem;
-    line-height: 1;
-    padding: 0 0.4rem;
-    background: none;
-    border: none;
+  .drawer-hint {
     color: var(--text-dim);
+    font-size: var(--fs-tiny);
+    margin-right: auto;
   }
-  .x:hover {
-    color: var(--text);
+  .collapse {
+    font-size: var(--fs-small);
+    padding: 0.15rem 0.55rem;
+    color: var(--text-dim);
   }
   .cols {
     display: flex;
-    gap: 1rem;
+    gap: 1.2rem;
     padding: 0.9rem;
     overflow: auto;
+    flex: 1;
+    min-height: 0;
   }
   .col {
     flex: 1;

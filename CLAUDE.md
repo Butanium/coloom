@@ -12,7 +12,7 @@ menu incl. the "summon <cursor> here" gesture, per-node gen-config inspection, p
 ("X is weaving…") from `gen_started/finished` events, live multi-client WS sync. Built by a
 spec-extraction workflow (`docs/ui-specs/*.md`, exact behaviors from Tapestry-Loom source) +
 6 parallel component agents + 7 adversarial playwright testers. **Tests: 73 fast
-(`uv run pytest`) + 108 browser-interaction (`uv run pytest tests/ui`, opt-in, needs the dev
+(`uv run pytest`) + 138 browser-interaction (`uv run pytest tests/ui`, opt-in, needs the dev
 stack: `uv run coloom-fake-openai` + `uv run coloom-server` + `cd web && npm run dev`).**
 Automated tests use the **gpt-fake** mock (`src/coloom/fake_openai.py` — random tokens/logprobs,
 free); real gpt4-base stays for fun manual smokes. Seed a dev weave:
@@ -31,7 +31,8 @@ preserved, `metadata.edited_by`) whose preserved tail tokens keep logprobs flagg
 `Token.inexact` (dotted underline, tooltip "logprob from pre-edit context"); nothing is ever
 destroyed — original branches survive as siblings; (5) **two-layer inference setups**
 (`docs/setups-api.md`, `src/coloom/setups.py`): model setups (endpoint + arbitrary API flags)
-+ sampler setups (model ref + overrides), CRUD UI in `SetupsDialog.svelte`, **several samplers
++ sampler setups (model ref + overrides), CRUD UI in `SetupsDrawer.svelte` (née SetupsDialog,
+now a bottom drawer — round 4), **several samplers
 active at once** → generate fans out one completion per active sampler (merge: model.params ←
 sampler.params ← request.params; api keys redacted everywhere).
 **Round 3 (2026-06-10, team coloom-ui: lead + teammates keys/textpane):** (1) fonts round 2
@@ -51,6 +52,20 @@ creates the root directly; fixed a Chromium text-canonicalization double-render;
 Known deferred: in-editor undo (ctrl+z doesn't revert applied edits), merge-with-parent,
 sibling sorting, virtualization, occasional emoji-edit test flake (silent no-op ~1/5),
 typing again within the 600ms debounce of an unapplied edit can double-append (rare).
+**Round 4 (2026-06-10 night, QoL batch, team coloom-ui):** (1) **sticky child navigation** —
+arrow-right returns to the child you last visited, not children[0] (per-window map in
+`keyboard.svelte.ts`); (2) **fast-nav flicker fixed** — late `cursor_moved` echoes of my own
+moves are absorbed while moves are in flight (`myPendingCursorEchoes` in `state.svelte.ts`;
+smoke: `scripts/small-smokes/smoke_no_cursor_flicker.py`); (3) **Alt+Arrow** = hardwired nav
+aliases that work even while typing in the doc (plain arrows stay caret moves); (4) setups
+editing moved from modal to a collapsible **bottom drawer** (`SetupsDrawer.svelte`, open state
+roams per profile) — top generators chips row + quick temp/max_tokens/n unchanged; (5) **canvas
+multi-select** — shift+drag rubber-band (never pans) + shift+click toggle (`selection.svelte.ts`,
+per-client), selection ring + floating bulk-action bar (`SelectionBar.svelte`: bookmark / collapse
+/ delete-with-cascade-confirm / clear), Escape clears; (6) activity tab hides plain cursor-move
+chatter — a move shows only when a real event follows it (summons always show); (7) test
+identities renamed `uitest-*`, dev/test weaves live in the picker's `testing` folder (seed
+script targets it); "keys" button renamed "keybindings".
 
 ## Layout
 - `src/coloom/models.py` — pydantic weave model (Node, Snippet/Tokens, Creator attribution, Cursor)

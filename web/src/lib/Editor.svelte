@@ -83,7 +83,7 @@
     class="keys-btn"
     onclick={() => (showKeybindings = true)}
     title="keyboard shortcuts"
-    data-testid="kb-open">keys</button
+    data-testid="kb-open">keybindings</button
   >
 </header>
 

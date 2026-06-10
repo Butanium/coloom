@@ -93,6 +93,9 @@
     <p class="hint">
       click a combo, then press the new keys — press escape while capturing to unbind
     </p>
+    <p class="hint">
+      alt+arrows always navigate the tree, even while typing in the text pane (not rebindable)
+    </p>
     <div class="body">
       {#each groups as group (group.category)}
         <section>

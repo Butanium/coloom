@@ -10,6 +10,7 @@
   } from './colors'
   import type { CardBox } from './layout'
   import { BTN, PAD, STRIP_W } from './layout'
+  import { selected, toggleSelected } from './selection.svelte'
   import {
     collapsed,
     createNode,
@@ -44,6 +45,7 @@
   // tokenOpacity over the dark bg (creatorColor stays for the border stroke).
   const color = $derived(creatorTextColor(node.creator))
   const hovered = $derived(session.hoveredNodeId === node.id)
+  const isSelected = $derived(selected.has(node.id))
   const myCursorHere = $derived(cursorsHere.some((c) => c.name === identity.name))
   const text = $derived(nodeText(node))
   const isCollapsed = $derived(collapsed.has(node.id))
@@ -89,11 +91,14 @@
   })
 
   // cursor pills (all named cursors) — adaptive widths, stacked above the card.
-  // width tracks the 13px pill-label font (≈7.6px/char advance + 14px padding)
+  // width tracks the 13px pill-label font (≈7.6px/char advance + 14px padding).
+  // long names middle-truncate (NOT end-truncate: names often share a prefix —
+  // uitest-clement/uitest-claude — and end-truncation made their pills identical)
   const pills = $derived.by(() => {
     let x = 0
     return cursorsHere.map((c) => {
-      const label = c.name.length > 10 ? `${c.name.slice(0, 9)}…` : c.name
+      const label =
+        c.name.length > 14 ? `${c.name.slice(0, 7)}…${c.name.slice(-6)}` : c.name
       const w = Math.round(14 + label.length * 7.6)
       const pill = { name: c.name, label, x, w }
       x += w + 4
@@ -112,8 +117,13 @@
     void generateAt(node.id, { moveCursor })
   }
 
-  function onCardClick() {
+  function onCardClick(e: MouseEvent) {
     if (suppressClick()) return
+    // shift+click = toggle multi-select; it must NOT move the cursor
+    if (e.shiftKey) {
+      toggleSelected(node.id)
+      return
+    }
     void moveMyCursor(node.id)
   }
 
@@ -263,6 +273,16 @@
         style:stroke={'var(--accent)'}
       />
     {/if}
+    {#if isSelected}
+      <rect
+        x={box.x - 8}
+        y={box.y - 8}
+        width={box.w + 16}
+        height={box.h + 16}
+        rx="12"
+        class="select-ring"
+      />
+    {/if}
     <foreignObject x={box.x} y={box.y} width={box.w} height={box.h}>
       <div class="text" style:color style:-webkit-line-clamp={Math.floor((box.h - 16) / 18)}>
         {#if text === ''}
@@ -379,6 +399,13 @@
     fill: none;
     stroke-width: 1.5;
     stroke-dasharray: 5 3;
+    pointer-events: none;
+  }
+  .select-ring {
+    /* multi-select: solid blue, outside the dashed accent cursor ring */
+    fill: rgba(91, 157, 217, 0.06);
+    stroke: #5b9dd9;
+    stroke-width: 2;
     pointer-events: none;
   }
   .text {

@@ -415,6 +415,11 @@ function trackEvent(event: WeaveEvent) {
   }
 }
 
+// While my own cursor moves are in flight, their server echoes (cursor_moved,
+// moved_by null) arrive late and would bounce the optimistic cursor back then
+// forward on fast navigation. One echo per successful POST: count them down.
+let myPendingCursorEchoes = 0
+
 // Patch cheap, frequent events (cursor moves, bookmarks) directly into the
 // local weave instead of a full refetch — navigation must not feel like a
 // network round trip. Returns true when the event was fully absorbed.
@@ -424,6 +429,17 @@ function patchEventLocally(event: WeaveEvent): boolean {
   if (event.type === 'cursor_moved') {
     const name = event.payload.name as string
     const nodeId = event.payload.node_id as string
+    // my own move's echo while more of my moves are pending: the optimistic
+    // state is already ahead of this echo — absorb it without patching
+    // (summons of my cursor by others carry moved_by and are never skipped)
+    if (
+      name === identity.name &&
+      myPendingCursorEchoes > 0 &&
+      (event.payload.moved_by ?? null) === null
+    ) {
+      myPendingCursorEchoes--
+      return true
+    }
     // node not in our snapshot yet (event raced ahead of a node_added
     // refetch) → fall back to the full refetch
     if (!w.nodes[nodeId]) return false
@@ -534,6 +550,7 @@ export function closeWeave() {
   session.changedNodeId = null
   session.events = []
   session.activeGens = []
+  myPendingCursorEchoes = 0
   closeContextMenu()
   collapsed.clear()
 }
@@ -588,10 +605,12 @@ export async function moveMyCursor(nodeId: string) {
   const weave = session.weave
   if (!weave) return
   applyCursorLocally(identity.name, nodeId, null)
+  myPendingCursorEchoes++
   await withToast(async () => {
     try {
       await api.setCursor(weave.id, identity.name, nodeId)
     } catch (e) {
+      myPendingCursorEchoes-- // failed POST emits no echo
       void refetchWeave() // roll back the optimistic move
       throw e
     }

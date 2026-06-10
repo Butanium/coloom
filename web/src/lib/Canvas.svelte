@@ -2,6 +2,8 @@
   import type { CardBox } from './layout'
   import { STRIP_W, edgePath, layoutWeave } from './layout'
   import NodeCard from './NodeCard.svelte'
+  import SelectionBar from './SelectionBar.svelte'
+  import { clearSelection, selectMany } from './selection.svelte'
   import {
     collapsed,
     identity,
@@ -110,18 +112,32 @@
     return map
   })
 
-  // ---------------------------------------------------------------- pan/zoom
+  // ---------------------------------------------------------------- pan/zoom + rubber-band
 
   let pressed = false
   let dragging = false
   let dragDist = 0
   let lastX = 0
   let lastY = 0
+  // shift+primary drag = rubber-band multi-select (it must NEVER pan)
+  let mode: 'pan' | 'rubber' = 'pan'
+  let rubberAnchor = { x: 0, y: 0 } // world coords
+  let rubber = $state<{ x: number; y: number; w: number; h: number } | null>(null)
+
+  function worldPoint(e: PointerEvent): { x: number; y: number } {
+    const rect = container.getBoundingClientRect()
+    return {
+      x: (e.clientX - rect.left - tx) / scale,
+      y: (e.clientY - rect.top - ty) / scale,
+    }
+  }
 
   function onPointerDown(e: PointerEvent) {
     // spec §2: drag with primary or middle button pans (right stays contextmenu)
     if (e.button !== 0 && e.button !== 1) return
     if (e.button === 1) e.preventDefault() // suppress browser middle-click autoscroll
+    mode = e.shiftKey && e.button === 0 ? 'rubber' : 'pan'
+    if (mode === 'rubber') rubberAnchor = worldPoint(e)
     pressed = true
     dragging = false
     dragDist = 0
@@ -134,24 +150,55 @@
     const dx = e.clientX - lastX
     const dy = e.clientY - lastY
     dragDist += Math.abs(dx) + Math.abs(dy)
-    // only become a pan (and capture the pointer) past the click threshold —
+    // only become a drag (and capture the pointer) past the click threshold —
     // capturing on pointerdown would retarget pointerup and swallow all clicks
     if (!dragging && dragDist > 4) {
       dragging = true
       container.setPointerCapture(e.pointerId)
     }
     if (dragging) {
-      tx += dx
-      ty += dy
+      if (mode === 'pan') {
+        tx += dx
+        ty += dy
+      } else {
+        const p = worldPoint(e)
+        rubber = {
+          x: Math.min(rubberAnchor.x, p.x),
+          y: Math.min(rubberAnchor.y, p.y),
+          w: Math.abs(p.x - rubberAnchor.x),
+          h: Math.abs(p.y - rubberAnchor.y),
+        }
+      }
     }
     lastX = e.clientX
     lastY = e.clientY
   }
 
   function onPointerUp() {
+    if (dragging && mode === 'rubber' && rubber && layout) {
+      const r = rubber
+      const hits: string[] = []
+      for (const [id, box] of layout.boxes) {
+        if (box.x < r.x + r.w && box.x + box.w > r.x && box.y < r.y + r.h && box.y + box.h > r.y) {
+          hits.push(id)
+        }
+      }
+      selectMany(hits)
+    }
+    rubber = null
     pressed = false
     dragging = false
   }
+
+  // selection is per-weave: drop it when the open weave changes
+  let selectionWeaveId: string | null = null
+  $effect(() => {
+    const id = session.weave?.id ?? null
+    if (id !== selectionWeaveId) {
+      selectionWeaveId = id
+      clearSelection()
+    }
+  })
 
   // card click handlers consult this: a drag is not a click
   function suppressClick() {
@@ -337,8 +384,12 @@
           />
         {/each}
       {/if}
+      {#if rubber}
+        <rect class="rubber" x={rubber.x} y={rubber.y} width={rubber.w} height={rubber.h} />
+      {/if}
     </g>
   </svg>
+  <SelectionBar />
   {#if layout && layout.boxes.size === 0}
     <div class="empty-hint">
       this weave is empty — write an opening in the text pane to start, {identity.name}
@@ -370,6 +421,13 @@
   .edge.on-thread {
     stroke: var(--accent);
     stroke-width: 2;
+  }
+  .rubber {
+    fill: rgba(91, 157, 217, 0.12);
+    stroke: #5b9dd9;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
   }
   .empty-hint {
     position: absolute;

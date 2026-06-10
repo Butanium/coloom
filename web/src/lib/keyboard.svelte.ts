@@ -11,6 +11,7 @@ import {
   matchesBinding,
   type ActionId,
 } from './keybindings.svelte'
+import { clearSelection } from './selection.svelte'
 import {
   closeContextMenu,
   collapsed,
@@ -35,6 +36,11 @@ function isEditableTarget(t: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 }
 
+// Sticky child navigation: going back toward the leaves returns to the child
+// you LAST visited, not children[0]. Per-window memory, ids validated against
+// the live children list (stale entries from deleted nodes just fall through).
+const lastVisitedChild = new Map<string, string>()
+
 /** Resolve cursor navigation from my cursor node; null = no move (no wrap). */
 function navigationTarget(dir: 'parent' | 'child' | 'prev' | 'next'): string | null {
   const weave = session.weave
@@ -43,9 +49,17 @@ function navigationTarget(dir: 'parent' | 'child' | 'prev' | 'next'): string | n
   if (!cur) return null
   const node = weave.nodes[cur]
   if (!node) return null
-  if (dir === 'parent') return node.parents[0] ?? null
+  if (dir === 'parent') {
+    const parent = node.parents[0] ?? null
+    if (parent !== null) lastVisitedChild.set(parent, cur) // remember the way back
+    return parent
+  }
   if (dir === 'child') {
-    const child = node.children[0]
+    const remembered = lastVisitedChild.get(cur)
+    const child =
+      remembered !== undefined && node.children.includes(remembered)
+        ? remembered
+        : node.children[0]
     if (child === undefined) return null
     collapsed.delete(cur) // auto-expand so the move is visible
     return child
@@ -58,6 +72,7 @@ function navigationTarget(dir: 'parent' | 'child' | 'prev' | 'next'): string | n
   if (idx === -1) return null
   const next = dir === 'prev' ? idx - 1 : idx + 1
   if (next < 0 || next >= siblings.length) return null // clamp, no wrap
+  if (parentId !== undefined) lastVisitedChild.set(parentId, siblings[next])
   return siblings[next]
 }
 
@@ -151,14 +166,29 @@ const handlers: Record<ActionId, () => boolean> = {
   generator_9: () => toggleGenerator(9),
 }
 
+const ALT_NAV: Record<string, 'parent' | 'child' | 'prev' | 'next'> = {
+  ArrowLeft: 'parent',
+  ArrowRight: 'child',
+  ArrowUp: 'prev',
+  ArrowDown: 'next',
+}
+
 function handleKeydown(e: KeyboardEvent) {
-  // never steal keys from text entry
-  if (isEditableTarget(e.target)) return
   // the keybindings dialog is capturing a combo: it owns every key, Escape included
   if (capture.suppressed) return
+  // hardwired Alt+Arrow nav aliases: modified combos aren't text entry, so these
+  // work even while focus is in the doc / an input (plain arrows stay caret moves)
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key in ALT_NAV) {
+    if (session.weave === null || contextMenu.open) return
+    if (navigate(ALT_NAV[e.key])) e.preventDefault()
+    return
+  }
+  // never steal keys from text entry
+  if (isEditableTarget(e.target)) return
 
   if (e.key === 'Escape') {
     closeContextMenu()
+    clearSelection()
     session.hoveredNodeId = null
     e.preventDefault()
     return

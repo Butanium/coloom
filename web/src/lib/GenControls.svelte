@@ -4,7 +4,8 @@
   // a manage menu (activate / hide / edit / duplicate / delete), param
   // overrides, and the weave button.
   import { paramsSummary } from './ParamsEditor.svelte'
-  import SetupsDialog, { type SetupsPrefill } from './SetupsDialog.svelte'
+  import SetupsDrawer, { type SetupsPrefill } from './SetupsDrawer.svelte'
+  import { getSetting, setSetting } from './profile.svelte'
   import {
     activeGenerators,
     generateAt,
@@ -51,13 +52,20 @@
   let maxTokens = $state<number | null>(null)
   let n = $state<number | null>(null)
 
-  let showSetups = $state(false)
+  // drawer open/closed roams with the profile (login happens before the editor mounts)
+  let showSetups = $state(getSetting<boolean>('setupsDrawerOpen', false) === true)
   let setupsPrefill = $state<SetupsPrefill | null>(null)
   let menuOpen = $state(false)
 
+  function setDrawer(open: boolean) {
+    showSetups = open
+    if (!open) setupsPrefill = null
+    setSetting('setupsDrawerOpen', open)
+  }
+
   function openSetups(prefill: SetupsPrefill | null = null) {
     setupsPrefill = prefill
-    showSetups = true
+    setDrawer(true)
     menuOpen = false
   }
 
@@ -228,8 +236,14 @@
         </div>
       {/if}
     </span>
-    <button class="setups-btn" onclick={() => openSetups()} data-testid="open-setups">
-      ⚙ setups
+    <button
+      class="setups-btn"
+      class:open={showSetups}
+      onclick={() => (showSetups ? setDrawer(false) : openSetups())}
+      title={showSetups ? 'collapse the setups drawer' : 'open the setups drawer'}
+      data-testid="open-setups"
+    >
+      ⚙ setups {showSetups ? '▾' : '▴'}
     </button>
   </div>
   <div class="params">
@@ -285,13 +299,7 @@
 </div>
 
 {#if showSetups}
-  <SetupsDialog
-    prefill={setupsPrefill}
-    onclose={() => {
-      showSetups = false
-      setupsPrefill = null
-    }}
-  />
+  <SetupsDrawer prefill={setupsPrefill} onclose={() => setDrawer(false)} />
 {/if}
 
 <style>
