@@ -17,6 +17,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -38,6 +39,12 @@ from pydantic import TypeAdapter
 
 _CONTENT = TypeAdapter(NodeContent)
 _CREATOR = TypeAdapter(Creator)
+
+# Request-scoped mutation origin: the per-tab client id (X-Coloom-Client header),
+# set by the server middleware around each request. Stamped into every logged
+# event's payload as `origin`, so clients can tell their own mutations' echoes
+# from remote changes (None = origin unknown: CLI, tests, old clients).
+current_origin: ContextVar[str | None] = ContextVar("coloom_origin", default=None)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS weaves (

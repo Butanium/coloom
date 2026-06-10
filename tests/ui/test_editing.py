@@ -133,6 +133,10 @@ def edit_replace(page, start, end, text):
 
 def type_at_end(page, text):
     """Place the caret at the very end of the doc and type `text`."""
+    # park the pointer off the doc first: a token tooltip opened by hover dwell
+    # (pointer resting on the doc between actions) would intercept the click
+    page.mouse.move(2, 2)
+    page.wait_for_timeout(350)
     page.locator(".doc").click()
     page.evaluate(
         """() => {
@@ -602,3 +606,55 @@ def test_multiline_insert_preserves_newlines(weave, page_as, api):
     after = get_weave(api, weave)
     assert len(after["nodes"]) >= n_before, "multiline insert destroyed a node"
     assert errors == [], f"page errors during multiline insert: {errors}"
+
+
+# ------------------------------------------- rapid typing across the sync window
+
+
+def test_rapid_typing_across_sync_window_no_duplication(weave, page_as, api):
+    """Type batch1; type batch2 inside batch1's apply/refetch window (the weave
+    refetch is route-DELAYED to hold the window open deterministically). The
+    serialized-edit design must NOT re-plan batch1 against a stale baseline:
+    exactly one node carries batch1, the doc equals the thread, nothing doubles.
+
+    Regression for the double-append bug (a second " BATCH-ONE BATCH-TWO" node
+    duplicating batch1 as a junk sibling branch)."""
+    page = page_as("uitest-clement", weave)
+    errors = collect_pageerrors(page)
+
+    # hold every weave refetch back 1500ms (initial load is already done)
+    page.route(f"**/weaves/{weave}", lambda route: (
+        page.wait_for_timeout(1500), route.continue_()
+    ))
+
+    type_at_end(page, " BATCH-ONE")
+    page.wait_for_timeout(800)  # past the 600ms debounce: plan 1 executed, refetch held
+    page.keyboard.type(" BATCH-TWO")
+
+    # settle: route delay + refetch + serialized second apply + reconcile
+    def settled():
+        w = get_weave(api, weave)
+        twos = [n for n in w["nodes"].values() if "BATCH-TWO" in node_text(n)]
+        return w if twos else None
+
+    assert wait_until(page, settled, deadline_s=12), (
+        f"second batch never landed; errors={errors}"
+    )
+    page.wait_for_timeout(2500)  # anything stale would land within this window
+    w = get_weave(api, weave)
+    ones = [n for n in w["nodes"].values() if "BATCH-ONE" in node_text(n)]
+    twos = [n for n in w["nodes"].values() if "BATCH-TWO" in node_text(n)]
+
+    assert len(ones) == 1, (
+        f"batch1 re-planned against a stale baseline -> duplicated into "
+        f"{len(ones)} nodes: {[node_text(n)[:50] for n in ones]}"
+    )
+    assert len(twos) == 1
+    assert "BATCH-ONE BATCH-TWO" in node_text(twos[0]), "batches did not coalesce"
+
+    # doc, thread and REST all agree; nothing rendered twice
+    th = get_thread(api, weave)
+    doc_text = page.locator(".doc").text_content() or ""
+    assert doc_text == th["content"], "doc diverged from the canonical thread"
+    assert doc_text.count("BATCH-ONE") == 1 and doc_text.count("BATCH-TWO") == 1
+    assert errors == [], f"page errors during rapid typing: {errors}"

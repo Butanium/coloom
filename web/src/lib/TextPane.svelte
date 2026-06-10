@@ -9,7 +9,7 @@
 <script lang="ts">
   import NodeTooltip from './NodeTooltip.svelte'
   import TokenTooltip from './TokenTooltip.svelte'
-  import { api } from './api'
+  import { api, ApiError } from './api'
   import { creatorTextColor, tokenOpacity } from './colors'
   import {
     buildBuffer,
@@ -26,6 +26,7 @@
     openContextMenu,
     session,
     threadPath,
+    toast,
     withToast,
   } from './state.svelte'
   import type { Token, WeaveNode } from './types'
@@ -53,33 +54,42 @@
   })
 
   // -------------------------------------------------- free-form edit state
-  // While `dirty` (user typed, edit not yet applied) or `applying` (executing
-  // the plan over REST), we must NOT re-render the doc from weave state — a
-  // WS-driven refetch would clobber the caret mid-edit. The guard freezes the
-  // rendered thread to the last weave-consistent snapshot.
+  // Edits are SERIALIZED: one plan in flight at a time, and the next diff only
+  // runs against a baseline that is known to include the previous edit.
+  //   dirty            user typed text that no plan covers yet
+  //   applying         a plan is executing over REST
+  //   awaitingBaseline plan executed; waiting for the refetched thread to catch
+  //                    up with the text we wrote (else the next diff would
+  //                    re-plan the previous edit -> duplicated nodes)
+  // While ANY of these holds, the doc must NOT re-render from weave state — a
+  // WS-driven refetch would clobber the DOM (and caret) the user is typing in.
   let dirty = $state(false)
   let applying = $state(false)
+  let awaitingBaseline = $state<{ text: string; caret: number | null; at: number } | null>(
+    null,
+  )
+  let baselineTick = $state(0) // re-evaluates the timeout while the thread is quiet
   let editTimer: ReturnType<typeof setTimeout> | undefined
   const EDIT_DEBOUNCE_MS = 600
+  const EDIT_RETRY_MS = 150
+  const BASELINE_TIMEOUT_MS = 4000
 
-  // The thread actually rendered: frozen while editing so the DOM the user is
-  // typing into doesn't get rebuilt under them.
+  // The thread actually rendered: frozen while editing/syncing so the DOM the
+  // user is typing into doesn't get rebuilt under them.
   let frozenThread: WeaveNode[] = $state([])
-  const renderThread = $derived(dirty || applying ? frozenThread : thread)
+  const editBusy = $derived(dirty || applying || awaitingBaseline !== null)
+  const renderThread = $derived(editBusy ? frozenThread : thread)
 
   $effect(() => {
-    // keep a fresh snapshot to freeze from, but only while NOT editing
-    if (!dirty && !applying) frozenThread = thread
+    // keep a fresh snapshot to freeze from, but only while fully idle
+    if (!editBusy) frozenThread = thread
   })
 
   function onInput() {
     if (!docEl) return
-    if (!dirty) {
-      frozenThread = thread // snapshot the pre-edit thread to diff against
-      dirty = true
-    }
+    dirty = true
     clearTimeout(editTimer)
-    editTimer = setTimeout(applyEdit, EDIT_DEBOUNCE_MS)
+    editTimer = setTimeout(() => void applyEdit(), EDIT_DEBOUNCE_MS)
   }
 
   // Block-aware text reconstruction. The browser sometimes splits multiline
@@ -157,13 +167,21 @@
 
   async function applyEdit() {
     clearTimeout(editTimer)
-    if (!docEl || !session.weave || applying) return
+    if (!docEl || !session.weave) return
+    if (applying || awaitingBaseline !== null) {
+      // an earlier edit hasn't settled: retry once it has (serialization — a
+      // diff against a baseline that lacks edit N would re-plan edit N)
+      editTimer = setTimeout(() => void applyEdit(), EDIT_RETRY_MS)
+      return
+    }
     const weaveId = session.weave.id
     // innerText (not textContent): when the browser splits multiline input into
     // block <div>s, textContent concatenates across them WITHOUT the newlines —
     // silently dropping pasted/typed paragraph breaks. innerText reconstructs them.
     const newText = docInnerText()
-    const buf = buildBuffer(frozenThread)
+    // diff against the LIVE thread: the gate above guarantees it includes every
+    // previously applied edit (frozenThread is only the rendering basis)
+    const buf = buildBuffer(thread)
     const kind = classifyEdit(buf, newText)
     if (kind === 'noop') {
       dirty = false
@@ -174,47 +192,66 @@
     applying = true
     try {
       await executePlan(weaveId, plan.ops)
-    } finally {
+    } catch (e) {
+      // partial plans surface, never wedge: the executed ops' events refetch the
+      // weave; dropping the edit state un-freezes onto canonical state
+      toast(`edit failed to apply: ${e instanceof ApiError ? e.message : e}`)
       applying = false
       dirty = false
       caret = null
+      return
     }
-    pendingDoc = { text: newText, caret: savedCaret }
-    // the WS refetch rebuilds the spans; restore the caret afterwards
-    if (savedCaret !== null) {
-      queueMicrotask(() => requestAnimationFrame(() => setCaretCharOffset(savedCaret)))
-    }
+    applying = false
+    caret = null
+    awaitingBaseline = { text: newText, caret: savedCaret, at: performance.now() }
+    // text typed while the plan executed is not covered by it: plan it next
+    dirty = docInnerText() !== newText
+    if (dirty) editTimer = setTimeout(() => void applyEdit(), EDIT_RETRY_MS)
   }
 
-  // After an edit applies, the DOM can hold user-typed text Svelte doesn't track
-  // (Chromium extends the LAST TOKEN SPAN's text node when typing at the doc
-  // end; an empty thread gets raw text nodes) — once the refetched thread paints
-  // the same text into proper spans it shows DOUBLED. When the thread catches up
-  // with what we wrote and the DOM text diverges, rebuild every span from weave
-  // state ({#key docEpoch}), sweep leftover untracked nodes, restore the caret.
-  let pendingDoc = $state<{ text: string; caret: number | null } | null>(null)
+  // Baseline settling: when the refetched thread catches up with the text we
+  // wrote, the edit cycle is complete. Un-freezing then re-renders from weave
+  // state — and the DOM may hold user-typed text Svelte doesn't track (Chromium
+  // extends the LAST TOKEN SPAN's text node when typing at the doc end; an
+  // empty thread gets raw text nodes), which would render DOUBLED — so rebuild
+  // every span ({#key docEpoch}), sweep untracked strays, restore the caret.
+  // Escape hatch: a concurrent remote edit can rewrite my thread so the exact
+  // text never appears — accept a remote-appended suffix, or give up after a
+  // timeout and rebase on whatever is canonical (never wedge the editor).
   let docEpoch = $state(0)
   $effect(() => {
-    const pending = pendingDoc
-    if (pending === null || dirty || applying || !docEl) return
-    if (buildBuffer(renderThread).text !== pending.text) return // refetch pending
-    pendingDoc = null
-    if (docInnerText() === pending.text) return // DOM already consistent
-    docEpoch++
+    const pending = awaitingBaseline
+    if (pending === null || applying || !docEl) return
+    void baselineTick // dependency: re-check the timeout while events are quiet
+    const t = buildBuffer(thread).text
+    if (t !== pending.text && !t.startsWith(pending.text)) {
+      if (performance.now() - pending.at < BASELINE_TIMEOUT_MS) {
+        setTimeout(() => baselineTick++, 250)
+        return
+      }
+    }
+    awaitingBaseline = null
+    if (dirty) return // user kept typing: the queued applyEdit diffs this fresh thread
     queueMicrotask(() =>
       requestAnimationFrame(() => {
         if (!docEl) return
-        for (const child of [...docEl.childNodes]) {
-          if (child.nodeType === Node.COMMENT_NODE) continue
-          if (
-            child instanceof Element &&
-            (child.hasAttribute('data-node-id') || child.querySelector('[data-node-id]'))
-          )
-            continue
-          child.remove()
+        if (docInnerText() !== buildBuffer(thread).text) {
+          docEpoch++
         }
-        if (pending.caret !== null && document.activeElement === docEl)
-          setCaretCharOffset(pending.caret)
+        requestAnimationFrame(() => {
+          if (!docEl) return
+          for (const child of [...docEl.childNodes]) {
+            if (child.nodeType === Node.COMMENT_NODE) continue
+            if (
+              child instanceof Element &&
+              (child.hasAttribute('data-node-id') || child.querySelector('[data-node-id]'))
+            )
+              continue
+            child.remove()
+          }
+          if (pending.caret !== null && document.activeElement === docEl)
+            setCaretCharOffset(pending.caret)
+        })
       }),
     )
   })
@@ -296,7 +333,7 @@
 
   $effect(() => {
     function onSelectionChange() {
-      if (!docEl || dirty || applying) return // mapping is stale mid-edit
+      if (!docEl || editBusy) return // mapping is stale mid-edit/sync
       const sel = document.getSelection()
       if (!sel || sel.rangeCount === 0) return
       const range = sel.getRangeAt(0) // first (sorted) end of the selection
@@ -487,7 +524,7 @@
     const changedId = session.changedNodeId
     const tailId = renderThread.length > 0 ? renderThread[renderThread.length - 1].id : null
     const inside = pointerInside
-    const editing = dirty || applying
+    const editing = editBusy
     const sc = scroller
     const isNewChange = at !== lastChangedAt
     lastChangedAt = at
@@ -553,7 +590,7 @@
     {/if}
   </div>
 
-  {#if dirty || applying}
+  {#if editBusy}
     <div class="editing-bar">editing… {applying ? 'syncing' : ''}</div>
   {/if}
 

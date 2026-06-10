@@ -12,7 +12,7 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from coloom.config import DEFAULT_PARAMS, ColoomConfig, ConfigError
@@ -36,7 +36,7 @@ from coloom.setups import (
     UpdateSamplerSetup,
     resolve_sampler,
 )
-from coloom.store import Conflict, NotFound, WeaveStore, WeaveStoreError
+from coloom.store import Conflict, NotFound, WeaveStore, WeaveStoreError, current_origin
 
 logger = logging.getLogger("coloom.server")
 
@@ -153,6 +153,16 @@ def create_app(store: WeaveStore, config: ColoomConfig | None = None) -> FastAPI
     app.state.store = store
     app.state.hub = hub
     app.state.config = config
+
+    @app.middleware("http")
+    async def stamp_origin(request: Request, call_next):
+        # per-tab client id → request-scoped origin, stamped into event payloads
+        # (contextvars propagate into call_next's task and threadpool endpoints)
+        token = current_origin.set(request.headers.get("x-coloom-client"))
+        try:
+            return await call_next(request)
+        finally:
+            current_origin.reset(token)
 
     def _404(exc: NotFound) -> HTTPException:
         return HTTPException(status_code=404, detail=str(exc))

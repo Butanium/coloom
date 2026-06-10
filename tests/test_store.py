@@ -281,3 +281,29 @@ def test_weave_json_export(store):
 
     again = Weave.model_validate_json(as_json)
     assert again == snapshot
+
+
+def test_event_origin_stamping(store):
+    """current_origin (request-scoped) is stamped into event payloads; without
+    it, payloads carry no origin key (CLI/tests/old clients)."""
+    from coloom.store import current_origin
+
+    w = store.create_weave(title="origins")  # logged with no origin set
+    token = current_origin.set("tab-abc123")
+    try:
+        node = store.add_node(w.id, Snippet(text="hi"), HumanCreator(label="c"),
+                              move_cursor="c")
+    finally:
+        current_origin.reset(token)
+    store.set_cursor(w.id, "c", node.id)  # back to no origin
+
+    events = store.get_events(w.id)
+    by_type = {}
+    for e in events:
+        by_type.setdefault(e["type"], []).append(e)
+    assert "origin" not in by_type["weave_created"][0]["payload"]
+    assert by_type["node_added"][0]["payload"]["origin"] == "tab-abc123"
+    # the cursor upsert INSIDE add_node shares the request scope
+    assert by_type["cursor_moved"][0]["payload"]["origin"] == "tab-abc123"
+    # the later set_cursor ran outside the scope
+    assert "origin" not in by_type["cursor_moved"][1]["payload"]

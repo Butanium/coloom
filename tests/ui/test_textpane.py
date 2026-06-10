@@ -89,6 +89,10 @@ def hover_token(page, index):
 
 def type_at_end(page, text):
     """Place the caret at the very end of the doc and type `text`."""
+    # park the pointer off the doc first: a token tooltip opened by hover dwell
+    # (pointer resting on the doc between actions) would intercept the click
+    page.mouse.move(2, 2)
+    page.wait_for_timeout(350)
     page.locator(".doc").click()
     page.evaluate(
         """() => {

@@ -23,10 +23,18 @@ export class ApiError extends Error {
   }
 }
 
+// Per-tab client id, sent on every request: the server stamps it into event
+// payloads as `origin`, so this tab can tell its own mutations' echoes from
+// remote changes (state.svelte.ts isOwnEvent).
+export const CLIENT_ID = crypto.randomUUID()
+
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: {
+      'X-Coloom-Client': CLIENT_ID,
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {

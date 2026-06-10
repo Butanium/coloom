@@ -340,3 +340,27 @@ def test_websocket_filter_excludes_other_weaves(client):
         event = ws.receive_json()
         assert event["weave_id"] == wid_a
         assert event["type"] == "node_added"
+
+
+def test_client_header_becomes_event_origin(client):
+    """X-Coloom-Client on a mutation is stamped into its events' payloads as
+    `origin` (incl. the bundled cursor move); requests without the header (CLI,
+    old clients) emit origin-less events."""
+    wid = make_weave(client)
+    since = client.get("/events").json()["cursor"]
+
+    resp = client.post(
+        f"/weaves/{wid}/nodes",
+        json={"text": "mine", "parent_id": None, "move_cursor": "clem"},
+        headers={"X-Coloom-Client": "tab-42"},
+    )
+    assert resp.status_code == 201
+    events = client.get(f"/events?since={since}").json()["events"]
+    assert {e["type"] for e in events} == {"node_added", "cursor_moved"}
+    assert all(e["payload"]["origin"] == "tab-42" for e in events)
+
+    add(client, wid, "headerless")  # no header -> no origin key
+    later = client.get(f"/events?since={since}").json()["events"]
+    headerless = [e for e in later if e["type"] == "node_added"
+                  and "origin" not in e["payload"]]
+    assert len(headerless) == 1
