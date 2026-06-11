@@ -1165,6 +1165,48 @@ export async function toggleBookmark(nodeId: string) {
   await withToast(() => api.setBookmark(weave.id, nodeId, !node.bookmarked))
 }
 
+/** Merge a node into its parent (server-side semantics — a NEW merged node,
+ * absorbed originals soft-deleted). Undo follows the BINDING rules of
+ * docs/events-api.md "Merge with parent": restore the deletion op + re-park
+ * cursors; child migration is an edge edit that restore does NOT reverse, so
+ * the merged node is deleted only when it took no children — deleting it
+ * otherwise would cascade onto the migrated children, which must stay. */
+export async function mergeWithParent(nodeId: string) {
+  await flushPendingEdits()
+  const weave = session.weave
+  if (!weave) return
+  await withToast(async () => {
+    const res = await api.mergeWithParent(weave.id, nodeId)
+    const tookChildren = res.merged_node.children.length > 0
+    const entry = pushUndo('merge with parent', weave.id, async () => {
+      try {
+        await api.restoreNode(weave.id, res.deleted_node_ids[0])
+      } catch (e) {
+        // 409 = already restored (another client undid it) — desired end state
+        if (!(e instanceof ApiError && e.status === 409)) throw e
+      }
+      await moveCursorsBack(weave.id, res.moved_cursors)
+      if (!tookChildren) {
+        // leaf merge: removing the merged copy completes a perfect undo
+        // (direct removeNode — the undo of an undo is not itself undoable)
+        await api.removeNode(weave.id, res.merged_node_id)
+        toast('merge undone', undefined, 'info')
+      } else {
+        toast(
+          'merge undone — merged copy kept (it carries the migrated children)',
+          undefined,
+          'info',
+        )
+      }
+    })
+    toast(
+      'merged with parent',
+      { label: 'undo', run: () => void withToast(() => undoEntry(entry)) },
+      'info',
+    )
+  })
+}
+
 export async function deleteNode(nodeId: string) {
   await flushPendingEdits()
   const weave = session.weave

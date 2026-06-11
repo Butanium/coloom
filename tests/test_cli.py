@@ -6,6 +6,19 @@ import pytest
 from coloom.cli import main
 
 
+@pytest.fixture(autouse=True)
+def isolated_profile(tmp_path, monkeypatch):
+    """Tests must not see the developer's real `coloom profile login` state."""
+    import coloom.cli as cli_mod
+
+    monkeypatch.delenv("COLOOM_PROFILE", raising=False)
+    monkeypatch.delenv("COLOOM_CURSOR", raising=False)
+    # a shell pinned to the LIVE stack must never redirect a test there
+    monkeypatch.delenv("COLOOM_SERVER", raising=False)
+    monkeypatch.delenv("COLOOM_WEAVE", raising=False)
+    monkeypatch.setattr(cli_mod, "PROFILE_FILE", tmp_path / "coloom" / "profile")
+
+
 def run(capsys, live_server, *argv) -> dict | list:
     main(["--server", live_server, *argv])
     captured = capsys.readouterr()
@@ -136,6 +149,61 @@ def test_cli_bookmark_split_rm(capsys, live_server):
     assert restored["restored_node_ids"] == [split["tail"]["id"]]
     tree = run(capsys, live_server, "--weave", wid, "read", "--tree")
     assert split["tail"]["id"] in tree["nodes"]
+
+
+def test_cli_node_prefix_resolution(capsys, live_server):
+    created = run(capsys, live_server, "new", "--text", "root")
+    wid = created["weave"]["id"]
+    root_id = created["root"]["id"]
+
+    # every node-id-taking command accepts a unique prefix
+    child = run(
+        capsys, live_server, "--weave", wid,
+        "add", "--parent", root_id[:8], "--text", " leaf",
+    )
+    assert child["parents"] == [root_id]
+    moved = run(capsys, live_server, "--weave", wid, "cursor", "set", child["id"][:8])
+    assert moved["node_id"] == child["id"]
+    booked = run(capsys, live_server, "--weave", wid, "bookmark", root_id[:8])
+    assert booked == {"node_id": root_id, "bookmarked": True}
+    node = run(capsys, live_server, "--weave", wid, "read", "--node", child["id"][:8])
+    assert node["id"] == child["id"]
+
+    # a prefix matching nothing passes through and 404s server-side
+    with pytest.raises(SystemExit):
+        run(capsys, live_server, "--weave", wid, "read", "--node", "ffffffff")
+    assert "not found" in capsys.readouterr().err
+
+    # an ambiguous prefix fails loudly rather than guessing
+    common = ""
+    for a, b in zip(root_id, child["id"]):
+        if a != b:
+            break
+        common += a
+    if common:  # ids share at least one leading char
+        with pytest.raises(SystemExit):
+            run(capsys, live_server, "--weave", wid, "read", "--node", common)
+        assert "ambiguous" in capsys.readouterr().err
+
+
+def test_cli_gen_and_tree_text_modes(capsys, live_server):
+    created = run(capsys, live_server, "new", "--text", "Once upon", "--as", "clem")
+    wid = created["weave"]["id"]
+    gen = make_cli_generator(capsys, live_server)
+    main([
+        "--server", live_server, "--weave", wid,
+        "gen", "--generator", gen["id"], "--text",
+    ])
+    gen_out = capsys.readouterr().out
+    assert gen_out.count("=== ") == 2  # one header per branch
+    assert "logprob" not in gen_out
+
+    main(["--server", live_server, "--weave", wid, "read", "--tree", "--text"])
+    tree_out = capsys.readouterr().out
+    lines = tree_out.splitlines()
+    assert len(lines) == 3  # root + 2 generated branches
+    assert "Once upon" in lines[0] and "(clem)" in lines[0]
+    assert all(line.startswith("  ") for line in lines[1:])  # children indented
 
 
 def test_cli_merge(capsys, live_server):

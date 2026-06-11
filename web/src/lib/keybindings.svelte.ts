@@ -22,6 +22,7 @@ export type ActionId =
   | 'generate_at_cursor_move'
   | 'toggle_bookmark'
   | 'toggle_collapsed'
+  | 'merge_with_parent'
   | 'delete_current'
   | 'undo'
   | 'fit_to_cursor'
@@ -44,6 +45,7 @@ export const ACTIONS: Action[] = [
   { id: 'generate_at_cursor_move', label: 'generate and follow', category: 'weaving' },
   { id: 'toggle_bookmark', label: 'toggle bookmark', category: 'node' },
   { id: 'toggle_collapsed', label: 'collapse / expand subtree', category: 'node' },
+  { id: 'merge_with_parent', label: 'merge node into parent', category: 'node' },
   { id: 'delete_current', label: 'delete node (and subtree)', category: 'node' },
   { id: 'undo', label: 'undo (restore deleted nodes)', category: 'node' },
   { id: 'fit_to_cursor', label: 'center view on my cursor', category: 'view' },
@@ -69,6 +71,7 @@ export const DEFAULT_BINDINGS: Record<ActionId, Binding> = {
   generate_at_cursor_move: bind('Enter', { ctrl: true, shift: true }),
   toggle_bookmark: bind('b'),
   toggle_collapsed: bind('c'),
+  merge_with_parent: bind('m', { ctrl: true }),
   delete_current: bind('Delete'),
   undo: bind('z', { ctrl: true }),
   fit_to_cursor: bind('9', { ctrl: true }),

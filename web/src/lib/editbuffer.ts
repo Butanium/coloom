@@ -337,6 +337,38 @@ function planMidEdit(buf: EditBuffer, d: BufferDiff, identity: string): EditOp[]
   const endNode = nodeAtOffset(buf, d.oldEnd)
   if (!prefixNode || !endNode) return []
 
+  // ---- edit at an ANCESTOR (task #6): the edit touches the span of a
+  // non-leaf thread node A while the cursor sits at a descendant. Instead of
+  // splitting A and copying the downstream chain node-by-node (the old
+  // behavior — it restructured the original branch), produce ONE new SIBLING
+  // of A holding the full consolidated edited text of the A..leaf path. The
+  // original branch stays COMPLETELY untouched — not even structurally.
+  // (Leaf-only edits keep the split/hybrid path below: it preserves token
+  // granularity, which consolidation deliberately gives up.)
+  const lastIdx = buf.nodes.length - 1
+  const startIdx = buf.nodes.indexOf(prefixNode)
+  const endIdxEarly = buf.nodes.indexOf(endNode)
+  if (!(startIdx === lastIdx && endIdxEarly === lastIdx)) {
+    const a = buf.nodes[startIdx]
+    const prev = buf.nodes[startIdx - 1]
+    // consolidated text == the post-edit buffer from A's start onward
+    const text =
+      buf.text.slice(a.start, d.prefix) + d.inserted + buf.text.slice(d.oldEnd)
+    return [
+      {
+        op: 'buildEdited',
+        parent: prev ? { kind: 'id', id: prev.id } : { kind: 'root' },
+        content: { type: 'snippet', text },
+        creator: { type: 'human', label: identity },
+        metadata: {
+          edited_by: identity,
+          edited_from: buf.nodes.slice(startIdx).map((n) => n.id),
+        },
+        moveCursor: true,
+      },
+    ]
+  }
+
   // (1) split the prefix-end node at the prefix boundary so the head keeps the
   // shared prefix. If the prefix lands exactly on a node boundary, no split —
   // the head is the node ending at `prefix` (or the chain root for prefix 0).

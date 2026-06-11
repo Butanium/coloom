@@ -11,6 +11,10 @@ Cursor name: --cursor or $COLOOM_CURSOR or the logged-in profile (default
 Profile:     `coloom profile login <name>` persists a profile (server-side
 settings, same as the web login); --cursor and --as then default to it, so CLI
 weaving is attributed exactly like web weaving. $COLOOM_PROFILE overrides.
+
+Node ids accept any unique prefix (resolved against the live snapshot; soft-
+deleted nodes need the full id). `gen`/`split`/`read` take --text to print
+plain text instead of token JSON.
 """
 
 from __future__ import annotations
@@ -83,6 +87,59 @@ def require_weave(args: argparse.Namespace) -> str:
     fail("no weave id: pass --weave or set $COLOOM_WEAVE")
 
 
+def resolve_node_ref(client: Client, weave_id: str, ref: str | None) -> str | None:
+    """Expand a unique node-id prefix to the full id (one snapshot fetch).
+    Full-length ids skip the fetch; a ref matching no live node passes
+    through untouched so soft-deleted nodes stay addressable by full id
+    (`restore`). Ambiguous prefixes fail loudly."""
+    if ref is None or len(ref) >= 32:
+        return ref
+    weave = client.request("GET", f"/weaves/{weave_id}")
+    matches = [nid for nid in weave["nodes"] if nid.startswith(ref)]
+    if len(matches) > 1:
+        listing = ", ".join(sorted(m[:12] for m in matches))
+        fail(f"node prefix {ref!r} is ambiguous: {listing}")
+    return matches[0] if matches else ref
+
+
+def node_text(node: dict) -> str:
+    content = node["content"]
+    if content["type"] == "snippet":
+        return content["text"]
+    return "".join(t["text"] for t in content["tokens"])
+
+
+def print_nodes_text(nodes: list[dict]) -> None:
+    """`gen --text` / `split --text` rendering: id header + plain text per
+    node. The full token JSON stays one `read --node` away."""
+    for node in nodes:
+        print(f"=== {node['id']} ===")
+        print(node_text(node))
+
+
+def print_tree_text(weave: dict) -> None:
+    """`read --tree --text` rendering: one indented line per node — id prefix,
+    flags ([*] bookmark, [@name] cursors), creator, first ~90 chars."""
+    cursors_at: dict[str, list[str]] = {}
+    for name, cur in weave["cursors"].items():
+        cursors_at.setdefault(cur["node_id"], []).append(name)
+
+    def line(node_id: str, depth: int) -> None:
+        node = weave["nodes"][node_id]
+        flags = "*" if node["bookmarked"] else ""
+        flags += "".join(f"@{n}" for n in sorted(cursors_at.get(node_id, [])))
+        preview = " ".join(node_text(node).split())
+        if len(preview) > 90:
+            preview = preview[:90] + "…"
+        creator = node["creator"]["label"] or node["creator"]["type"]
+        print(f"{'  ' * depth}{node_id[:8]}{flags and ' [' + flags + ']'} ({creator}) {preview}")
+        for child in node["children"]:
+            line(child, depth + 1)
+
+    for root in weave["roots"]:
+        line(root, 0)
+
+
 # ------------------------------------------------------------ commands
 
 
@@ -111,9 +168,19 @@ def cmd_list(client: Client, args: argparse.Namespace) -> None:
 def cmd_read(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
     if args.node:
-        out(client.request("GET", f"/weaves/{wid}/nodes/{args.node}"))
+        node = client.request(
+            "GET", f"/weaves/{wid}/nodes/{resolve_node_ref(client, wid, args.node)}"
+        )
+        if args.text:
+            sys.stdout.write(node_text(node))
+        else:
+            out(node)
     elif args.tree:
-        out(client.request("GET", f"/weaves/{wid}"))
+        weave = client.request("GET", f"/weaves/{wid}")
+        if args.text:
+            print_tree_text(weave)
+        else:
+            out(weave)
     else:
         thread = client.request("GET", f"/weaves/{wid}/cursors/{args.cursor}/thread")
         if args.text:
@@ -133,7 +200,7 @@ def cmd_add(client: Client, args: argparse.Namespace) -> None:
             f"/weaves/{wid}/nodes",
             json={
                 "text": text,
-                "parent_id": args.parent,
+                "parent_id": resolve_node_ref(client, wid, args.parent),
                 "creator": {"type": args.creator_type, "label": args.as_label},
                 "move_cursor": args.cursor if args.move_cursor else None,
             },
@@ -151,7 +218,10 @@ def cmd_cursor(client: Client, args: argparse.Namespace) -> None:
             client.request(
                 "PUT",
                 f"/weaves/{wid}/cursors/{name}",
-                json={"node_id": args.node_id, "moved_by": args.cursor},
+                json={
+                    "node_id": resolve_node_ref(client, wid, args.node_id),
+                    "moved_by": args.cursor,
+                },
             )
         )
     else:  # rm
@@ -199,19 +269,21 @@ def cmd_gen(client: Client, args: argparse.Namespace) -> None:
     if args.n is not None:
         params["n"] = args.n
     generator_id = resolve_generator_ref(client, args.generator, logged_in_profile())
-    out(
-        client.request(
-            "POST",
-            f"/weaves/{wid}/gen",
-            json={
-                "node_id": args.node,
-                "cursor": args.cursor,
-                "generator_id": generator_id,
-                "params": params,
-                "move_cursor": args.move_cursor,
-            },
-        )
+    nodes = client.request(
+        "POST",
+        f"/weaves/{wid}/gen",
+        json={
+            "node_id": resolve_node_ref(client, wid, args.node),
+            "cursor": args.cursor,
+            "generator_id": generator_id,
+            "params": params,
+            "move_cursor": args.move_cursor,
+        },
     )
+    if args.text:
+        print_nodes_text(nodes)
+    else:
+        out(nodes)
 
 
 def cmd_events(client: Client, args: argparse.Namespace) -> None:
@@ -223,10 +295,11 @@ def cmd_events(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_bookmark(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
+    node_id = resolve_node_ref(client, wid, args.node_id)
     out(
         client.request(
             "PUT",
-            f"/weaves/{wid}/nodes/{args.node_id}/bookmark",
+            f"/weaves/{wid}/nodes/{node_id}/bookmark",
             json={"bookmarked": not args.remove},
         )
     )
@@ -234,28 +307,37 @@ def cmd_bookmark(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_rm(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
-    out(client.request("DELETE", f"/weaves/{wid}/nodes/{args.node_id}"))
+    node_id = resolve_node_ref(client, wid, args.node_id)
+    out(client.request("DELETE", f"/weaves/{wid}/nodes/{node_id}"))
 
 
 def cmd_restore(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
+    # no prefix resolution: soft-deleted nodes aren't in the live snapshot
     out(client.request("POST", f"/weaves/{wid}/nodes/{args.node_id}/restore"))
 
 
 def cmd_split(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
-    out(
-        client.request(
-            "POST", f"/weaves/{wid}/nodes/{args.node_id}/split", json={"at": args.at}
-        )
+    node_id = resolve_node_ref(client, wid, args.node_id)
+    result = client.request(
+        "POST", f"/weaves/{wid}/nodes/{node_id}/split", json={"at": args.at}
     )
+    if args.text:
+        print("--- head ---")
+        print_nodes_text([result["head"]])
+        print("--- tail ---")
+        print_nodes_text([result["tail"]])
+    else:
+        out(result)
 
 
 def cmd_merge(client: Client, args: argparse.Namespace) -> None:
     wid = require_weave(args)
+    node_id = resolve_node_ref(client, wid, args.node_id)
     out(
         client.request(
-            "POST", f"/weaves/{wid}/nodes/{args.node_id}/merge-with-parent"
+            "POST", f"/weaves/{wid}/nodes/{node_id}/merge-with-parent"
         )
     )
 
@@ -398,12 +480,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("read", help="read your cursor's thread (default), tree, or node")
     group = p.add_mutually_exclusive_group()
     group.add_argument("--tree", action="store_true", help="full weave snapshot")
-    group.add_argument("--node", help="single node by id")
-    p.add_argument("--text", action="store_true", help="plain text instead of JSON")
+    group.add_argument("--node", help="single node by id (or unique prefix)")
+    p.add_argument(
+        "--text",
+        action="store_true",
+        help="plain text instead of JSON (--tree: indented one-line-per-node outline)",
+    )
     p.set_defaults(func=cmd_read)
 
     p = sub.add_parser("add", help="add a manual branch")
-    p.add_argument("--parent", help="parent node id (omit for a new root)")
+    p.add_argument(
+        "--parent", help="parent node id or unique prefix (omit for a new root)"
+    )
     p.add_argument("--text")
     p.add_argument("--stdin", action="store_true", help="read text from stdin")
     p.add_argument(
@@ -424,14 +512,21 @@ def build_parser() -> argparse.ArgumentParser:
     cp = cursor_sub.add_parser(
         "set", help="move a cursor (yours by default; --name for someone else's)"
     )
-    cp.add_argument("node_id")
+    cp.add_argument("node_id", help="node id or unique prefix")
     cp.add_argument("--name", help="cursor to move (default: your own)")
     cp = cursor_sub.add_parser("rm", help="remove a cursor")
     cp.add_argument("--name", help="cursor to remove (default: your own)")
     p.set_defaults(func=cmd_cursor)
 
     p = sub.add_parser("gen", help="generate branches from a node via the base model")
-    p.add_argument("--node", help="parent node id (default: your cursor)")
+    p.add_argument(
+        "--node", help="parent node id or unique prefix (default: your cursor)"
+    )
+    p.add_argument(
+        "--text",
+        action="store_true",
+        help="print id + text per branch instead of full token JSON",
+    )
     p.add_argument(
         "--generator",
         help="generator id, or name within your profile (default: the profile's"
@@ -472,6 +567,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("split", help="split a node (token index / char offset)")
     p.add_argument("node_id")
     p.add_argument("--at", type=int, required=True)
+    p.add_argument(
+        "--text",
+        action="store_true",
+        help="print head/tail id + text instead of full token JSON",
+    )
     p.set_defaults(func=cmd_split)
 
     p = sub.add_parser(

@@ -116,6 +116,17 @@ export const api = {
       'POST',
       `/weaves/${weaveId}/nodes/${nodeId}/restore`,
     ),
+  /** Merge node N into its parent P: a NEW node M = concat(P, N) appears
+   * (under P's parent), N's children migrate to M, the absorbed originals are
+   * soft-deleted (deleted_node_ids, DELETE vocabulary — restorable). 409 on a
+   * root. Contract: docs/events-api.md "Merge with parent". */
+  mergeWithParent: (weaveId: string, nodeId: string) =>
+    request<{
+      merged_node_id: string
+      merged_node: WeaveNode
+      deleted_node_ids: string[]
+      moved_cursors: { name: string; from: string; to: string | null }[]
+    }>('POST', `/weaves/${weaveId}/nodes/${nodeId}/merge-with-parent`),
   splitNode: (weaveId: string, nodeId: string, at: number) =>
     request<{ head: WeaveNode; tail: WeaveNode }>(
       'POST',

@@ -20,6 +20,7 @@ import {
   flushPendingEdits,
   generateAt,
   hasPendingEdits,
+  mergeWithParent,
   moveMyCursor,
   myCursorNodeId,
   sendViewCommand,
@@ -146,6 +147,14 @@ const handlers: Record<ActionId, () => boolean> = {
     const cur = myCursorNodeId()
     if (cur === null) return false
     toggleCollapsed(cur)
+    return true
+  },
+  merge_with_parent: () => {
+    const cur = myCursorNodeId()
+    if (cur === null) return false
+    const node = session.weave?.nodes[cur]
+    if (!node || node.parents.length === 0) return false // a root has no parent
+    void mergeWithParent(cur)
     return true
   },
   delete_current: () => {

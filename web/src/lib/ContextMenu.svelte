@@ -12,6 +12,7 @@
     deleteNode,
     generateAt,
     identity,
+    mergeWithParent,
     moveCursorOf,
     moveMyCursor,
     session,
@@ -133,6 +134,16 @@
         )}
     >
       add sibling
+    </button>
+    <button
+      role="menuitem"
+      disabled={isRoot}
+      title={isRoot
+        ? 'roots have no parent to merge into'
+        : 'absorb into the parent: a new merged node replaces both (undoable)'}
+      onclick={() => run(() => mergeWithParent(nodeId))}
+    >
+      merge with parent
     </button>
 
     <div class="sep"></div>

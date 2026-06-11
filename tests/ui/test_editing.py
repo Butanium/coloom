@@ -386,75 +386,69 @@ def test_mid_node_edit_of_model_tokens_makes_hybrid_sibling(weave, page_as, api)
     ), "inexact tokens not visually marked in the doc"
 
 
-# ---------------------------------------------------------------- downstream copy
+# ------------------------------------------- edit at an ancestor (task #6)
 
 
-def test_mid_thread_edit_copies_downstream_node_with_provenance(weave, page_as, api):
-    """Edit a node that has a downstream thread node: the downstream node is
-    re-created on the new branch as a copy (creator preserved, copied_from
-    provenance, tokens flagged inexact), and the cursor lands on the deepest copy.
-    The original chain remains untouched as a sibling."""
+def test_mid_thread_edit_at_ancestor_consolidates_to_new_sibling(weave, page_as, api):
+    """Edit the span of an ANCESTOR node while the cursor sits at a descendant:
+    ONE new sibling of the edited node appears, holding the consolidated edited
+    text of the whole ancestor..leaf path; the original branch is COMPLETELY
+    untouched (no split, no per-node copies); the cursor moves to the new node.
+    (Task #6 — replaces the old split+branch+downstream-copy behavior.)"""
     page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
     thread = get_thread(api, weave)
-    # uitest-clement's thread is [human-root-snippet, model-tokens]. Build a downstream
-    # node so the EDITED node (the root snippet) has a thread node after it.
     root = thread["nodes"][0]
     _, tok_node = tokens_node_of_thread(thread)
-    # put the cursor on the root snippet so the model-tokens node is downstream
-    set_cursor(api, weave, root["id"])
-    assert wait_for_doc(page, lambda t: node_text(root)[:20] in t), "doc did not follow cursor"
-    # the rendered thread is now just the root (cursor at root). To have a real
-    # DOWNSTREAM node, edit the FIRST node while a child is on-thread: move cursor
-    # to the model tokens node, which makes [root, tokens] the thread; edit inside
-    # root so `tokens` is downstream.
+    # cursor on the tokens node -> thread [root, tokens]; edit inside root
     set_cursor(api, weave, tok_node["id"])
-    assert wait_for_doc(page, lambda t: "".join(
-        x["text"] for x in tok_node["content"]["tokens"]
-    )[:10] in t), "doc did not rebuild on cursor move"
-
+    root_text, tok_text = node_text(root), node_text(tok_node)
+    assert wait_for_doc(page, lambda t: t == root_text + tok_text), (
+        "thread did not render"
+    )
     before = get_weave(api, weave)
-    root_text = node_text(root)
+    n_before = len(before["nodes"])
+
     # edit a range inside the root snippet (offsets 4..8 -> mid 'loom hummed')
     edit_replace(page, 4, 8, "WOVE")
     flush_edit(page)
+    expected = root_text[:4] + "WOVE" + root_text[8:] + tok_text
 
-    def settled():
+    def consolidated():
         now = get_weave(api, weave)
-        fresh = set(now["nodes"]) - set(before["nodes"])
-        # expect: split tail of root + new edited snippet + a copied tokens node
-        copied = [
-            now["nodes"][nid] for nid in fresh
-            if now["nodes"][nid]["metadata"].get("copied_from") == tok_node["id"]
-        ]
-        return (now, fresh, copied[0]) if copied else None
+        fresh = [n for nid, n in now["nodes"].items() if nid not in before["nodes"]]
+        return (now, fresh[0]) if len(fresh) == 1 else None
 
-    result = wait_until(page, settled)
-    assert result, f"downstream copy not produced; errors={errors}"
-    after, fresh, copy = result
+    result = wait_until(page, consolidated)
+    assert result, f"ancestor edit produced no consolidated node; errors={errors}"
+    now, new = result
+    assert len(now["nodes"]) == n_before + 1, (
+        f"exactly ONE new node expected, weave grew {n_before} -> {len(now['nodes'])}"
+    )
+    assert new["content"] == {"type": "snippet", "text": expected}, (
+        "consolidated text != edited A..leaf path"
+    )
+    assert new["creator"]["type"] == "human"
+    assert new["creator"]["label"] == "uitest-clement"
+    assert new["metadata"].get("edited_by") == "uitest-clement"
+    assert new["metadata"].get("edited_from") == [root["id"], tok_node["id"]]
+    # sibling of the edited ancestor: the root has no parent -> a new ROOT
+    assert new["parents"] == []
+    assert new["id"] in now["roots"]
 
-    # the copy preserves the original creator + flags its tokens inexact
-    assert copy["creator"]["type"] == tok_node["creator"]["type"]
-    assert copy["content"]["type"] == "tokens"
-    assert [t["text"] for t in copy["content"]["tokens"]] == [
-        t["text"] for t in tok_node["content"]["tokens"]
-    ], "copied token text diverged from the source"
-    assert all(t.get("inexact") is True for t in copy["content"]["tokens"]), (
-        "copied tokens not flagged inexact"
+    # the original branch is untouched — content AND structure
+    assert now["nodes"][root["id"]]["content"] == root["content"], (
+        "ancestor edit mutated the original node"
+    )
+    assert node_text(now["nodes"][tok_node["id"]]) == tok_text
+    assert now["nodes"][root["id"]]["children"] == before["nodes"][root["id"]]["children"], (
+        "ancestor edit restructured the original branch (split?)"
     )
 
-    # original node untouched (still in the weave with its original content)
-    assert node_text(after["nodes"][tok_node["id"]]) == "".join(
-        t["text"] for t in tok_node["content"]["tokens"]
-    ), "original downstream node was mutated (should be copied, not moved)"
-
-    # cursor landed on the deepest new node = the copy
-    assert get_cursor(api, weave)["node_id"] == copy["id"], "cursor did not land on the copy"
-    # the edited middle is in the doc
-    assert wait_for_doc(page, lambda t: "WOVE" in t), "edited text not rendered"
-    # the head (root id) keeps the kept prefix of the original snippet
-    assert after["nodes"][root["id"]]["content"]["text"] == root_text[:4]
-    assert errors == [], f"page errors during downstream-copy edit: {errors}"
+    # cursor on the new node; the doc shows the consolidated thread
+    assert get_cursor(api, weave)["node_id"] == new["id"], "cursor did not follow"
+    assert wait_for_doc(page, lambda t: t == expected), "doc did not re-render"
+    assert errors == [], f"page errors during ancestor edit: {errors}"
 
 
 # ---------------------------------------------------------------- tail deletion
@@ -565,15 +559,14 @@ def test_emoji_snippet_edit_is_codepoint_correct(weave, page_as, api):
     thread = get_thread(api, weave)
     _, tok_node = tokens_node_of_thread(thread)
 
-    # build a fresh single-snippet thread with an emoji so offsets are controlled
+    # build a fresh single-snippet LEAF with an emoji so offsets are controlled.
+    # The leaf must stay the cursor node: a leaf mid-edit takes the split+branch
+    # path (which is what exercises code-point splitting) — an edit with
+    # downstream would consolidate instead (task #6) and never split.
     emoji_node = add_node(
         api, weave, "AB😀CD downstream tail here", parent=tok_node["id"]
     )
-    # a downstream node so the edit is a mid-thread edit that exercises a snippet
-    # split (and a copy), not a pure tail edit
-    down = add_node(api, weave, "TAILNODE", parent=emoji_node["id"])
-    set_cursor(api, weave, down["id"])
-    assert wait_for_doc(page, lambda t: "AB😀CD" in t and "TAILNODE" in t), (
+    assert wait_for_doc(page, lambda t: "AB😀CD" in t), (
         "doc did not render the emoji thread"
     )
     before = get_weave(api, weave)

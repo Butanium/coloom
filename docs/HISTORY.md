@@ -167,5 +167,18 @@ it carries the move, or something legitimately newer like a summon). Repro evide
 (7) **whitespace-only tokens are hoverable** — `\n`/space tokens render ~zero width and had no
 hover target for the logprob tooltip; an absolutely-positioned halo (`.token.ws::after`,
 inset -2/-3px) extends the hit area without shifting layout, tinted on hover as feedback.
+(8) **merge-with-parent UI** (retrier built the op): context-menu entry (disabled on
+roots) + rebindable Ctrl+M; undo follows the binding rules — restore the absorbed originals +
+re-park cursors, delete the merged copy ONLY when it took no children (else it must stay or
+its deletion would cascade onto the migrated children); driven entirely off the response
+(`deleted_node_ids` / `merged_node.children`), never recomputed client-side. Tests:
+`tests/ui/test_merge.py` (sibling + in-place-leaf + root-disabled).
+(9) **edit-at-ancestor consolidation** (task #6): free-form-editing the span of a NON-LEAF
+thread node (cursor at a descendant) now produces ONE new sibling of the edited node holding
+the full consolidated edited A..leaf text — the original branch is completely untouched, not
+even split (the old behavior split the ancestor and copied the downstream chain node-by-node).
+Leaf-only edits keep the split/hybrid path (token granularity preserved there); consolidation
+deliberately degrades to a snippet. Cursor moves to the new node. `planMidEdit` in
+`editbuffer.ts`; tests re-targeted accordingly (the emoji code-point test is leaf-only now).
 Known deferred: "X is editing…" presence ping for held-local edits; localStorage draft
 persistence; round-5 deferreds.
