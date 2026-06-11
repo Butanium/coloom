@@ -493,6 +493,52 @@ export function myCursorNodeId(): string | null {
   return session.weave?.cursors[identity.name]?.node_id ?? null
 }
 
+// ---- in-flight generation placeholders (task #24) ---------------------------
+
+export const GEN_PENDING_PREFIX = 'gen-pending:'
+
+export function isGenPendingId(id: string): boolean {
+  return id.startsWith(GEN_PENDING_PREFIX)
+}
+
+/** session.weave augmented with PHANTOM children for every in-flight
+ * generation: one skeleton per expected completion (gen_started carries `n`),
+ * attached under the generation's target node. Tree + canvas render these as
+ * pending placeholders; they vanish when gen_finished lands (the real nodes
+ * arrive via the node_added refetch; a failure already surfaces as a toast).
+ * Call inside $derived — reads session.weave and session.activeGens. */
+export function weaveWithPlaceholders(): Weave | null {
+  const w = session.weave
+  if (!w) return null
+  if (session.activeGens.length === 0) return w
+  const nodes = { ...w.nodes }
+  for (const g of session.activeGens) {
+    const parent = nodes[g.node_id]
+    if (!parent) continue // target not in the snapshot (yet) — no phantom
+    const ids: string[] = []
+    const label = g.retry
+      ? `retrying ${g.retry.attempt}/${g.retry.max}${g.retry.error ? ` — ${g.retry.error}` : ''}`
+      : 'generating…'
+    for (let i = 0; i < g.n; i++) {
+      const id = `${GEN_PENDING_PREFIX}${g.gen_id}:${i}`
+      ids.push(id)
+      nodes[id] = {
+        id,
+        parents: [g.node_id],
+        children: [],
+        content: { type: 'snippet', text: label },
+        creator: { type: 'model', label: g.generator ?? 'model' },
+        created: g.started,
+        modified: g.started,
+        bookmarked: false,
+        metadata: { gen_pending: true, requester: g.requester },
+      }
+    }
+    nodes[g.node_id] = { ...parent, children: [...parent.children, ...ids] }
+  }
+  return { ...w, nodes }
+}
+
 // Dev/test introspection: lets playwright tests / debugging read client-side
 // state (e.g. "where does THIS tab think my cursor is") without scraping the
 // DOM. Dev builds only; assertions still go through REST per test conventions.
@@ -522,6 +568,46 @@ let refetchSeq = 0
 let refetchesInFlight = 0
 let patchedDuringRefetch: WeaveEvent[] = []
 
+// Pending optimistic cursor moves (incident 5): name -> the move we POSTed
+// whose value a SNAPSHOT hasn't authoritatively carried yet. A snapshot
+// fetched before our POST but assigned after it silently claws the cursor
+// back — and the own-origin echo is absorbed (leg 1), so patch replay (leg 2)
+// alone can't restore it (replaying an absorbed echo is still a no-op). Cure:
+// re-assert pending moves over every assigned snapshot, until a snapshot
+// whose fetch STARTED after the POST settled is assigned — that snapshot is
+// authoritative for the move (it carries it, or something legitimately newer
+// like a summon) and retires the pending entry either way. NOTE the echo must
+// NOT retire the entry: it can arrive before the stale snapshot does.
+const pendingCursorMoves = new Map<
+  string,
+  { nodeId: string; movedBy: string | null; settledAt: number | null }
+>()
+
+/** Stamp a pending move as POST-settled (confirmation is snapshot-time-based). */
+function settlePendingCursor(name: string, nodeId: string) {
+  const pending = pendingCursorMoves.get(name)
+  if (pending && pending.nodeId === nodeId) pending.settledAt = performance.now()
+}
+
+function reassertPendingCursors(weave: Weave, fetchStartedAt: number) {
+  for (const [name, pending] of [...pendingCursorMoves]) {
+    if (pending.settledAt !== null && pending.settledAt < fetchStartedAt) {
+      // fetched after the server accepted the move: authoritative — retire
+      // the entry and let the snapshot stand (ours, or legitimately newer)
+      pendingCursorMoves.delete(name)
+      continue
+    }
+    if (weave.cursors[name]?.node_id === pending.nodeId) continue // already carried
+    if (!weave.nodes[pending.nodeId]) continue // target gone; let truth stand
+    weave.cursors[name] = {
+      name,
+      node_id: pending.nodeId,
+      updated: new Date().toISOString(),
+      moved_by: pending.movedBy,
+    }
+  }
+}
+
 async function refetchWeave() {
   if (activeWeaveId === null || refetchQueued) return
   refetchQueued = true
@@ -530,6 +616,7 @@ async function refetchWeave() {
   const id = activeWeaveId
   if (id === null) return
   const mySeq = ++refetchSeq
+  const fetchStartedAt = performance.now()
   refetchesInFlight++
   try {
     const weave = await api.getWeave(id)
@@ -537,6 +624,7 @@ async function refetchWeave() {
       session.weave = weave
       for (const ev of patchedDuringRefetch) patchEventLocally(ev)
       patchedDuringRefetch = []
+      reassertPendingCursors(weave, fetchStartedAt)
     }
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {
@@ -563,8 +651,20 @@ function trackEvent(event: WeaveEvent) {
       requester: (event.payload.requester as string | null) ?? null,
       node_id: event.payload.node_id as string,
       generator: (event.payload.generator as string | null) ?? null,
+      n: typeof event.payload.n === 'number' && event.payload.n > 0 ? event.payload.n : 1,
       started: event.created,
+      retry: null,
     })
+  } else if (event.type === 'gen_retrying') {
+    // transient failure, the server is retrying: surface it on the placeholder
+    const gen = session.activeGens.find((g) => g.gen_id === event.payload.gen_id)
+    if (gen) {
+      gen.retry = {
+        attempt: typeof event.payload.attempt === 'number' ? event.payload.attempt : 0,
+        max: typeof event.payload.max === 'number' ? event.payload.max : 0,
+        error: typeof event.payload.error === 'string' ? event.payload.error : '',
+      }
+    }
   } else if (event.type === 'gen_finished') {
     session.activeGens = session.activeGens.filter(
       (g) => g.gen_id !== event.payload.gen_id,
@@ -681,7 +781,13 @@ function handleEvent(event: WeaveEvent) {
     session.changedNodeId = id
     session.changedAt = Date.now()
   }
-  if (event.type === 'gen_started' || event.type === 'gen_finished') return // no weave mutation
+  if (
+    event.type === 'gen_started' ||
+    event.type === 'gen_retrying' ||
+    event.type === 'gen_finished'
+  ) {
+    return // no weave mutation (trackEvent maintains activeGens)
+  }
   if (patchEventLocally(event)) {
     // remember patches an in-flight snapshot might be staler than
     if (refetchesInFlight > 0) patchedDuringRefetch.push(event)
@@ -709,6 +815,7 @@ function connectWs(weaveId: string) {
 }
 
 export async function openWeave(weaveId: string) {
+  await flushPendingEdits() // a held edit in the weave being left must land first
   closeWeave()
   activeWeaveId = weaveId
   session.loading = true
@@ -742,6 +849,7 @@ export function closeWeave() {
   reconnectTimer = null
   ws?.close()
   ws = null
+  pendingCursorMoves.clear()
   session.weave = null
   session.loadError = null
   session.hoveredNodeId = null
@@ -754,11 +862,45 @@ export function closeWeave() {
 
 // ---------------------------------------------------------------- actions
 
+// ---- boundary-flush of free-form edits --------------------------------------
+// Free-form doc edits stay LOCAL until a boundary action (Clément 2026-06-10):
+// generate, any cursor move, node ops, undo, weave switch, doc blur, tab hide.
+// TextPane registers its flusher here; every weave-mutating action below
+// awaits flushPendingEdits() FIRST, so the held edit lands on the server (and
+// settles) before the action runs — "send the node update, then run the next
+// one". The flusher resolves immediately when there's nothing to flush, and
+// no-ops re-entrantly while its own edit plan is executing (the plan's cursor
+// moves use the NoFlush variant).
+
+export interface EditFlusher {
+  flush(): Promise<void>
+  dirty(): boolean
+}
+
+let editFlusher: EditFlusher | null = null
+
+export function registerEditFlusher(f: EditFlusher | null) {
+  editFlusher = f
+}
+
+/** Apply any locally-held free-form edit and wait for it to settle. Safe to
+ * call from anywhere; resolves immediately when there is nothing pending. */
+export async function flushPendingEdits(): Promise<void> {
+  if (editFlusher) await editFlusher.flush()
+}
+
+/** Is there typed text no edit plan has covered yet? (e.g. keyboard generate
+ * fires even when the cursor only comes to exist via the flush) */
+export function hasPendingEdits(): boolean {
+  return editFlusher !== null && editFlusher.dirty()
+}
+
 /** Generate at a node: fans out ONE request per ACTIVE generator (children
  * from each model/temp appear side by side). With nothing active, falls back
  * to the FOCUSED generator so a fresh profile's weave button still works.
  * Only the first request may move the cursor. */
 export async function generateAt(nodeId: string, opts: { moveCursor?: boolean } = {}) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   let gens = validActiveGenerators()
@@ -787,10 +929,13 @@ export async function generateAt(nodeId: string, opts: { moveCursor?: boolean } 
 }
 
 /** Apply a cursor move locally right away (optimistic — the server echo via
- * cursor_moved re-patches the same state; a failed POST refetches to undo). */
+ * cursor_moved re-patches the same state; a failed POST refetches to undo).
+ * Also registers the move as PENDING so a stale snapshot assigned mid-flight
+ * can't claw it back (incident 5 — see reassertPendingCursors). */
 function applyCursorLocally(name: string, nodeId: string, movedBy: string | null) {
   const w = session.weave
   if (!w || !w.nodes[nodeId]) return
+  pendingCursorMoves.set(name, { nodeId, movedBy, settledAt: null })
   w.cursors[name] = {
     name,
     node_id: nodeId,
@@ -800,13 +945,22 @@ function applyCursorLocally(name: string, nodeId: string, movedBy: string | null
 }
 
 export async function moveMyCursor(nodeId: string) {
+  await flushPendingEdits()
+  await moveMyCursorNoFlush(nodeId)
+}
+
+/** moveMyCursor WITHOUT the edit flush — for the edit plan executor itself
+ * (TextPane executePlan), whose cursor moves are part of the flush. */
+export async function moveMyCursorNoFlush(nodeId: string) {
   const weave = session.weave
   if (!weave) return
   applyCursorLocally(identity.name, nodeId, null)
   await withToast(async () => {
     try {
       await api.setCursor(weave.id, identity.name, nodeId)
+      settlePendingCursor(identity.name, nodeId)
     } catch (e) {
+      pendingCursorMoves.delete(identity.name) // the move is dead, don't re-assert it
       void refetchWeave() // roll back the optimistic move
       throw e
     }
@@ -814,13 +968,16 @@ export async function moveMyCursor(nodeId: string) {
 }
 
 export async function moveCursorOf(name: string, nodeId: string) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   applyCursorLocally(name, nodeId, identity.name)
   await withToast(async () => {
     try {
       await api.setCursor(weave.id, name, nodeId, identity.name)
+      settlePendingCursor(name, nodeId)
     } catch (e) {
+      pendingCursorMoves.delete(name)
       void refetchWeave()
       throw e
     }
@@ -828,6 +985,7 @@ export async function moveCursorOf(name: string, nodeId: string) {
 }
 
 export async function appendText(text: string) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   await withToast(() =>
@@ -844,6 +1002,7 @@ export async function createNode(
   text: string,
   opts: { parentId: string | null; moveCursor?: boolean },
 ) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   return withToast(() =>
@@ -864,6 +1023,7 @@ export async function branchAtToken(
   tokenIndex: number,
   alt: TopLogprob,
 ) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   const node = weave.nodes[nodeId]
@@ -961,7 +1121,10 @@ export function undoLastAction(): boolean {
     toast('nothing to undo', undefined, 'info')
     return true
   }
-  void withToast(() => undoLast(weave.id))
+  void withToast(async () => {
+    await flushPendingEdits()
+    await undoLast(weave.id)
+  })
   return true
 }
 
@@ -978,6 +1141,7 @@ export async function deleteChildren(nodeId: string) {
 /** Bulk delete (multi-select bar, delete-children): one undo entry + one
  * toast for the batch. Cascades handle descendants server-side. */
 export async function deleteNodes(ids: string[]) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave || ids.length === 0) return
   await withToast(async () => {
@@ -993,6 +1157,7 @@ export async function deleteNodes(ids: string[]) {
 }
 
 export async function toggleBookmark(nodeId: string) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   const node = weave.nodes[nodeId]
@@ -1001,6 +1166,7 @@ export async function toggleBookmark(nodeId: string) {
 }
 
 export async function deleteNode(nodeId: string) {
+  await flushPendingEdits()
   const weave = session.weave
   if (!weave) return
   await withToast(async () => {

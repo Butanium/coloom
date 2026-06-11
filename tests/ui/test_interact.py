@@ -699,8 +699,9 @@ def test_typing_in_doc_does_not_trigger_shortcuts(page_as, weave, api):
     page.keyboard.type("gb2")
     page.keyboard.press("ArrowLeft")
     page.keyboard.press("ArrowUp")
-    # generous window: edit debounce applies AND a wrongly-triggered
-    # generation would land within this
+    # generous window: a wrongly-triggered generation/bookmark would land
+    # within this (the typed text itself stays local — edits are
+    # local-until-boundary and no boundary fires here)
     page.wait_for_timeout(2500)
 
     assert dialogs == [], f"confirm dialog fired from doc keys: {dialogs}"

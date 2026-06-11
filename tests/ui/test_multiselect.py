@@ -273,3 +273,59 @@ def test_escape_clears_selection(weave, page_as, api):
     assert page.locator(".selbar").count() == 0, "bulk bar survived Escape"
     # nothing was deleted/changed server-side
     assert len(weave_json(api, weave)["nodes"]) == len(w["nodes"])
+
+
+# ---------------------------------------------------------------- Delete key (item 7)
+
+
+def test_delete_key_deletes_whole_selection(weave, page_as, api):
+    """With a multi-selection active, the Delete key takes the SelectionBar
+    bulk path: every selected node (+ cascade) goes, ONE undo toast for the
+    batch, no confirmation, selection cleared."""
+    page = page_as("uitest-clement", weave)
+    w, root1, kids = seed_ids(api, weave)
+    fit_weave(page)
+    victim = kids[1]  # 2 leaf children -> 3-node cascade
+    subtree = [victim, *w["nodes"][victim]["children"]]
+
+    dialogs = []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+    shift_click_card(page, victim)
+    assert "1 selected" in page.locator(".selbar").inner_text()
+
+    # focus is on the canvas area (not an editable) -> Delete = bulk delete
+    page.keyboard.press("Delete")
+
+    def gone():
+        nodes = weave_json(api, weave)["nodes"]
+        return all(nid not in nodes for nid in subtree)
+
+    assert wait_until(page, gone), "Delete key did not remove the selected subtree"
+    assert dialogs == [], f"Delete-key bulk delete must not confirm: {dialogs}"
+    assert wait_until(
+        page, lambda: page.get_by_test_id("toast-action").count() == 1, deadline_s=4
+    ), "expected exactly one undo toast for the Delete-key batch"
+    assert wait_until(page, lambda: page.locator(".selbar").count() == 0, deadline_s=4), (
+        "selection not cleared after Delete-key bulk delete"
+    )
+    # the cursor node was NOT deleted (selection took precedence over cursor)
+    cur = weave_json(api, weave)["cursors"]["uitest-clement"]["node_id"]
+    assert cur in weave_json(api, weave)["nodes"]
+
+
+def test_delete_key_while_typing_stays_text_deletion(weave, page_as, api):
+    """Delete pressed while the focus is in the editable doc must NOT delete
+    nodes, selection or not."""
+    page = page_as("uitest-clement", weave)
+    w, root1, kids = seed_ids(api, weave)
+    fit_weave(page)
+    shift_click_card(page, kids[1])
+    n_before = len(weave_json(api, weave)["nodes"])
+
+    page.locator(".doc").click()  # focus the contenteditable
+    page.keyboard.press("Delete")
+    page.wait_for_timeout(800)
+
+    assert len(weave_json(api, weave)["nodes"]) == n_before, (
+        "Delete inside the doc deleted nodes (editable guard broken)"
+    )

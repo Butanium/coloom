@@ -3,7 +3,9 @@
 For UI work and testing without burning real API credit. Honors `n`, `max_tokens`,
 `logprobs` (top-k size), `seed`, and `temperature` (flattens the fake distribution);
 emits the same response shape coloom's parser consumes (tokens / token_logprobs /
-top_logprobs / text_offset), so generated nodes carry full Token data.
+top_logprobs / text_offset), so generated nodes carry full Token data. Test-only
+body params: `delay` (exact per-request sleep) and `fail_times`/`fail_key`/
+`fail_status` (fail the first N requests sharing a key — drives retry tests).
 
 Run: `uv run coloom-fake-openai [--port 9999] [--delay 0.5] [--seed 0]`
 Point an endpoint at it:
@@ -20,6 +22,7 @@ import random
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 WORDS = (
     "the of and a to in is it you that he was for on are with as his they be at"
@@ -101,6 +104,11 @@ def _gen_choice(
 def build_app(default_seed: int | None = None, delay: float = 0.0) -> FastAPI:
     app = FastAPI(title="gpt-fake")
     counter = {"requests": 0}
+    # synthetic-failure bookkeeping for retry tests: requests already failed,
+    # keyed by the request body's `fail_key` (see below)
+    fail_counts: dict[str, int] = {}
+    received: list[dict] = []  # request bodies, for test assertions
+    app.state.received = received
 
     @app.get("/v1/models")
     async def models() -> dict:
@@ -110,10 +118,31 @@ def build_app(default_seed: int | None = None, delay: float = 0.0) -> FastAPI:
             "data": [{"id": "gpt-fake", "object": "model", "owned_by": "coloom"}],
         }
 
-    @app.post("/v1/completions")
-    async def completions(request: Request) -> dict:
+    @app.post("/v1/completions", response_model=None)
+    async def completions(request: Request) -> dict | JSONResponse:
         body = await request.json()
         counter["requests"] += 1
+        received.append(body)
+        # synthetic-failure mode for retry tests: a `fail_times` body param
+        # makes the first N requests sharing the same `fail_key` fail with
+        # `fail_status` (default 500), then succeed. Like `delay`, these ride
+        # the params pass-through — a test generator opts in via its params.
+        fail_times = int(body.get("fail_times") or 0)
+        if fail_times > 0:
+            key = str(body.get("fail_key") or "")
+            failed = fail_counts.get(key, 0)
+            if failed < fail_times:
+                fail_counts[key] = failed + 1
+                status = int(body.get("fail_status") or 500)
+                return JSONResponse(
+                    status_code=status,
+                    content={
+                        "error": {
+                            "message": f"synthetic failure {failed + 1}/{fail_times}"
+                            f" (key={key!r})"
+                        }
+                    },
+                )
         seed = body.get("seed", default_seed)
         rng = random.Random(seed if seed is not None else rng_entropy())
         n = int(body.get("n", 1))
@@ -122,6 +151,13 @@ def build_app(default_seed: int | None = None, delay: float = 0.0) -> FastAPI:
         temperature = float(body.get("temperature", 1.0))
         if delay > 0:
             await asyncio.sleep(delay * (0.5 + rng.random()))
+        # per-request override: a `delay` param in the body sleeps EXACTLY that
+        # long (deterministic) — lets one test/generator opt into a held-open
+        # in-flight window (e.g. the gen-placeholder UI) without slowing the
+        # whole stack via --delay
+        req_delay = float(body.get("delay") or 0)
+        if req_delay > 0:
+            await asyncio.sleep(req_delay)
         return {
             "id": f"cmpl-fake-{counter['requests']}",
             "object": "text_completion",

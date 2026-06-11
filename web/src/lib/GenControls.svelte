@@ -8,10 +8,12 @@
   import { paramsSummary } from './ParamsEditor.svelte'
   import GeneratorsDrawer, { type GeneratorsPrefill } from './GeneratorsDrawer.svelte'
   import { api } from './api'
+  import { interactionAuthority, type InteractionAuthority } from './authority'
   import { dragnum } from './dragnum'
   import { getSetting, setSetting } from './profile.svelte'
   import {
     confirmDeleteGenerator,
+    flushPendingEdits,
     focusGenerator,
     focusedGenerator,
     generateAt,
@@ -64,6 +66,11 @@
   // Values shown = the focused generator's own param overrides; placeholders =
   // the resolved inherited value. Edits persist via debounced PATCH; emptying
   // a field clears the override (params key → null).
+  //
+  // Each field is guarded by an interactionAuthority (docs/optimistic-state.md
+  // LEG 3): while the user is mid-gesture (input focused / dragnum drag), the
+  // refresh after a PATCH (or a remote event) must NOT re-seed the input under
+  // their hands — that was the value-jumps-backwards bug (incident 4).
 
   const QUICK_KEYS = ['temperature', 'max_tokens', 'n'] as const
   type QuickKey = (typeof QUICK_KEYS)[number]
@@ -74,13 +81,31 @@
     n: null,
   })
 
-  // re-seed the inputs whenever focus moves or the generator's data changes
-  // (e.g. a PATCH response / remote event refreshed the list)
+  const auth: Record<QuickKey, InteractionAuthority<number | null>> = {
+    temperature: interactionAuthority(),
+    max_tokens: interactionAuthority(),
+    n: interactionAuthority(),
+  }
+
+  // Seed / reconcile the inputs from the focused generator. Focus moving to a
+  // different generator re-binds the row: reset + unconditional seed. The same
+  // generator refreshing (PATCH echo, remote event) goes through receive(),
+  // which defers while a gesture is active and absorbs our own echo.
+  let boundFocusId: string | null | undefined = undefined
   $effect(() => {
+    const f = focused
+    const id = f?.id ?? null
     for (const key of QUICK_KEYS) {
-      const v = focused?.params[key]
-      quick[key] = typeof v === 'number' ? v : null
+      const raw = f?.params[key]
+      const v = typeof raw === 'number' ? raw : null
+      if (id !== boundFocusId) {
+        auth[key].reset()
+        quick[key] = v
+      } else {
+        auth[key].receive(v, (nv) => (quick[key] = nv))
+      }
     }
+    boundFocusId = id
   })
 
   let patchTimers: Partial<Record<QuickKey, ReturnType<typeof setTimeout>>> = {}
@@ -91,11 +116,20 @@
     const target = focused
     if (!target) return
     const value = quick[key]
+    auth[key].edited(value) // we're ahead of the server until the echo returns
     clearTimeout(patchTimers[key])
     patchTimers[key] = setTimeout(() => {
       delete patchTimers[key]
       void withToast(async () => {
-        await api.updateGenerator(target.id, { params: { [key]: value } })
+        try {
+          await api.updateGenerator(target.id, { params: { [key]: value } })
+        } catch (e) {
+          // relinquish authority + re-seed from server truth: the failure is
+          // surfaced (toast via withToast), the divergence isn't hidden
+          auth[key].failed()
+          void refreshGenerators()
+          throw e
+        }
         await refreshGenerators()
       })
     }, 400)
@@ -114,6 +148,8 @@
   }
 
   async function genAtCursor() {
+    // boundary-flush first: a held doc edit may move (or create) my cursor
+    await flushPendingEdits()
     const nodeId = myCursorNodeId()
     if (nodeId) await generateAt(nodeId)
   }
@@ -302,6 +338,8 @@
         min="0"
         placeholder={inheritedQuick('temperature')}
         bind:value={quick.temperature}
+        onfocus={() => auth.temperature.gestureStart()}
+        onblur={() => auth.temperature.gestureEnd()}
         onchange={() => pushQuickParam('temperature')}
         disabled={!focused}
         use:dragnum={{
@@ -309,8 +347,13 @@
           min: 0,
           decimals: 2,
           get: () => quick.temperature,
-          set: (v) => ((quick.temperature = v), pushQuickParam('temperature')),
+          set: (v) => (quick.temperature = v),
           seed: () => seedParam('temperature', 1),
+          dragStart: () => auth.temperature.gestureStart(),
+          dragEnd: () => {
+            pushQuickParam('temperature') // commit-on-release
+            auth.temperature.gestureEnd()
+          },
         }}
         data-testid="param-temp"
       />
@@ -323,6 +366,8 @@
         min="1"
         placeholder={inheritedQuick('max_tokens')}
         bind:value={quick.max_tokens}
+        onfocus={() => auth.max_tokens.gestureStart()}
+        onblur={() => auth.max_tokens.gestureEnd()}
         onchange={() => pushQuickParam('max_tokens')}
         disabled={!focused}
         use:dragnum={{
@@ -330,8 +375,13 @@
           min: 1,
           decimals: 0,
           get: () => quick.max_tokens,
-          set: (v) => ((quick.max_tokens = v), pushQuickParam('max_tokens')),
+          set: (v) => (quick.max_tokens = v),
           seed: () => seedParam('max_tokens', 32),
+          dragStart: () => auth.max_tokens.gestureStart(),
+          dragEnd: () => {
+            pushQuickParam('max_tokens') // commit-on-release
+            auth.max_tokens.gestureEnd()
+          },
         }}
         data-testid="param-max-tokens"
       />
@@ -344,6 +394,8 @@
         min="1"
         placeholder={inheritedQuick('n')}
         bind:value={quick.n}
+        onfocus={() => auth.n.gestureStart()}
+        onblur={() => auth.n.gestureEnd()}
         onchange={() => pushQuickParam('n')}
         disabled={!focused}
         use:dragnum={{
@@ -351,8 +403,13 @@
           min: 1,
           decimals: 0,
           get: () => quick.n,
-          set: (v) => ((quick.n = v), pushQuickParam('n')),
+          set: (v) => (quick.n = v),
           seed: () => seedParam('n', 1),
+          dragStart: () => auth.n.gestureStart(),
+          dragEnd: () => {
+            pushQuickParam('n') // commit-on-release
+            auth.n.gestureEnd()
+          },
         }}
         data-testid="param-n"
       />

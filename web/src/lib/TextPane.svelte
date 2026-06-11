@@ -21,9 +21,10 @@
   import {
     generateAt,
     identity,
-    moveMyCursor,
+    moveMyCursorNoFlush,
     myCursorNodeId,
     openContextMenu,
+    registerEditFlusher,
     session,
     threadPath,
     toast,
@@ -54,8 +55,14 @@
   })
 
   // -------------------------------------------------- free-form edit state
-  // Edits are SERIALIZED: one plan in flight at a time, and the next diff only
-  // runs against a baseline that is known to include the previous edit.
+  // Edits stay LOCAL until a BOUNDARY (no auto-apply timer): doc blur,
+  // generate, any cursor move / node op / undo, weave switch, tab hide. Every
+  // weave-mutating action in state.svelte.ts awaits flushPendingEdits(), which
+  // calls our flushEdits() below — so one deliberate edit session lands as ONE
+  // plan (one split + one node for a mid-thread edit), and the action runs
+  // only after the edit settles ("send the node update, then run the next").
+  // Edits are still SERIALIZED: one plan in flight at a time, and the next
+  // diff only runs against a baseline that includes the previous edit.
   //   dirty            user typed text that no plan covers yet
   //   applying         a plan is executing over REST
   //   awaitingBaseline plan executed; waiting for the refetched thread to catch
@@ -69,10 +76,11 @@
     null,
   )
   let baselineTick = $state(0) // re-evaluates the timeout while the thread is quiet
-  let editTimer: ReturnType<typeof setTimeout> | undefined
-  const EDIT_DEBOUNCE_MS = 600
-  const EDIT_RETRY_MS = 150
   const BASELINE_TIMEOUT_MS = 4000
+  const SETTLE_POLL_MS = 25
+  // must comfortably cover BASELINE_TIMEOUT_MS: a flush that gives up early
+  // abandons the held edit with no later boundary to land it (esp. blur)
+  const FLUSH_SETTLE_TIMEOUT_MS = 6000
 
   // The thread actually rendered: frozen while editing/syncing so the DOM the
   // user is typing into doesn't get rebuilt under them.
@@ -88,9 +96,49 @@
   function onInput() {
     if (!docEl) return
     dirty = true
-    clearTimeout(editTimer)
-    editTimer = setTimeout(() => void applyEdit(), EDIT_DEBOUNCE_MS)
   }
+
+  /** The boundary flush: apply the held edit (if any) and wait for the cycle
+   * to settle, so the caller's action runs against a thread that contains it.
+   * Re-entrancy: our own executePlan never lands here (it uses the NoFlush
+   * cursor move), but a second boundary racing a first just waits alongside —
+   * applyEdit() itself refuses to run while a plan is in flight. Capped: a
+   * settle that drags (concurrent remote edits) never wedges the action. */
+  async function flushEdits(): Promise<void> {
+    const deadline = performance.now() + FLUSH_SETTLE_TIMEOUT_MS
+    while (performance.now() < deadline) {
+      if (!applying && awaitingBaseline === null) {
+        if (!dirty) return // fully settled
+        await applyEdit()
+        // still dirty with nothing in flight = applyEdit couldn't run (weave
+        // gone, doc unmounted) — bail rather than spin
+        if (dirty && !applying && awaitingBaseline === null) return
+        continue
+      }
+      await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
+    }
+  }
+
+  $effect(() => {
+    registerEditFlusher({ flush: flushEdits, dirty: () => dirty })
+    return () => registerEditFlusher(null)
+  })
+
+  // tab hidden / closing: best-effort flush so locally-held text isn't lost
+  $effect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden' && dirty) void flushEdits()
+    }
+    const onUnload = () => {
+      if (dirty) void flushEdits()
+    }
+    document.addEventListener('visibilitychange', onHide)
+    window.addEventListener('beforeunload', onUnload)
+    return () => {
+      document.removeEventListener('visibilitychange', onHide)
+      window.removeEventListener('beforeunload', onUnload)
+    }
+  })
 
   // Block-aware text reconstruction. The browser sometimes splits multiline
   // contenteditable input into block <div>s; textContent/Range.toString() join
@@ -166,12 +214,11 @@
   }
 
   async function applyEdit() {
-    clearTimeout(editTimer)
     if (!docEl || !session.weave) return
     if (applying || awaitingBaseline !== null) {
-      // an earlier edit hasn't settled: retry once it has (serialization — a
-      // diff against a baseline that lacks edit N would re-plan edit N)
-      editTimer = setTimeout(() => void applyEdit(), EDIT_RETRY_MS)
+      // an earlier edit hasn't settled (serialization — a diff against a
+      // baseline that lacks edit N would re-plan edit N): the boundary flush
+      // loop retries once it has
       return
     }
     const weaveId = session.weave.id
@@ -204,17 +251,24 @@
     applying = false
     caret = null
     awaitingBaseline = { text: newText, caret: savedCaret, at: performance.now() }
-    // text typed while the plan executed is not covered by it: plan it next
+    // text typed while the plan executed is not covered by it: stays dirty,
+    // lands at the next boundary (the flush loop also picks it up)
     dirty = docInnerText() !== newText
-    if (dirty) editTimer = setTimeout(() => void applyEdit(), EDIT_RETRY_MS)
   }
 
   // Baseline settling: when the refetched thread catches up with the text we
   // wrote, the edit cycle is complete. Un-freezing then re-renders from weave
   // state — and the DOM may hold user-typed text Svelte doesn't track (Chromium
   // extends the LAST TOKEN SPAN's text node when typing at the doc end; an
-  // empty thread gets raw text nodes), which would render DOUBLED — so rebuild
-  // every span ({#key docEpoch}), sweep untracked strays, restore the caret.
+  // empty thread gets raw text nodes), which would render DOUBLED. Recovery:
+  // rebuild the WHOLE .doc element ({#key docEpoch} wraps the div) and restore
+  // focus + caret. We must NEVER surgically remove "stray" nodes inside the
+  // editable region instead: Svelte 5 uses empty TEXT nodes (not just comments)
+  // as block anchors, and Chromium freely extends/splits them while the user
+  // types — a sweep once removed the each-block's `#text ""` anchor, after
+  // which every insertion targeted a detached node and silently vanished (the
+  // permanently-blank-pane bug). Replacing the element discards strays AND
+  // browser-mauled anchors in one move; the fresh element is pristine.
   // Escape hatch: a concurrent remote edit can rewrite my thread so the exact
   // text never appears — accept a remote-appended suffix, or give up after a
   // timeout and rebase on whatever is canonical (never wedge the editor).
@@ -231,26 +285,24 @@
       }
     }
     awaitingBaseline = null
-    if (dirty) return // user kept typing: the queued applyEdit diffs this fresh thread
+    if (dirty) return // user kept typing: the next boundary flush diffs this fresh thread
     queueMicrotask(() =>
       requestAnimationFrame(() => {
         if (!docEl) return
-        if (docInnerText() !== buildBuffer(thread).text) {
-          docEpoch++
-        }
-        requestAnimationFrame(() => {
-          if (!docEl) return
-          for (const child of [...docEl.childNodes]) {
-            if (child.nodeType === Node.COMMENT_NODE) continue
-            if (
-              child instanceof Element &&
-              (child.hasAttribute('data-node-id') || child.querySelector('[data-node-id]'))
-            )
-              continue
-            child.remove()
-          }
+        if (docInnerText() === buildBuffer(thread).text) {
+          // DOM already canonical (Svelte's un-freeze re-render landed clean)
           if (pending.caret !== null && document.activeElement === docEl)
             setCaretCharOffset(pending.caret)
+          return
+        }
+        const wasFocused = document.activeElement === docEl
+        docEpoch++ // replace the .doc element wholesale (see comment above)
+        requestAnimationFrame(() => {
+          if (!docEl) return
+          if (wasFocused) {
+            docEl.focus()
+            if (pending.caret !== null) setCaretCharOffset(pending.caret)
+          }
         })
       }),
     )
@@ -306,7 +358,9 @@
         lastCreated = node.id
       } else if (op.op === 'moveCursor') {
         const id = resolve(op.target)
-        if (id) await moveMyCursor(id)
+        // NoFlush: this cursor move is PART of the flush — the flushing
+        // variant would wait on the very plan executing it
+        if (id) await moveMyCursorNoFlush(id)
       }
     }
   }
@@ -322,7 +376,8 @@
   }
 
   function onDocBlur() {
-    if (dirty) void applyEdit()
+    // leaving the doc is a boundary: the held edit lands as one plan
+    if (dirty) void flushEdits()
   }
 
   // -------------------------------------------------- local caret (click = caret only)
@@ -455,7 +510,6 @@
   $effect(() => () => {
     clearTimeout(showTimer)
     clearTimeout(hideTimer)
-    clearTimeout(editTimer)
   })
 
   // close a tooltip whose node vanished from the weave
@@ -553,7 +607,9 @@
   <div class="scroller" bind:this={scroller} onclick={onScrollerClick}>
     {#if session.weave}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
+      <!-- {#key} wraps the WHOLE element: an epoch bump replaces it (fresh
+           Svelte anchors), never mutates inside it — see the baseline effect -->
+      {#key docEpoch}<div
         class="doc"
         bind:this={docEl}
         contenteditable="plaintext-only"
@@ -561,8 +617,7 @@
         data-placeholder={placeholder}
         oninput={onInput}
         onblur={onDocBlur}
-      >
-        {#key docEpoch}{#each renderThread as node (node.id)}
+      >{#each renderThread as node (node.id)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <span
             class="node"
@@ -581,17 +636,22 @@
                   class="token"
                   class:tok-hover={isTokenHot(node.id, i)}
                   class:inexact={isInexact(t)}
+                  class:ws-nl={t.text.trim() === '' && t.text.includes('\n')}
                   style:opacity={tokenOpacity(t)}
                   onpointerenter={(e) => onTokenEnter(node.id, i, e.currentTarget)}
                   onpointerleave={() => onTokenLeave(node.id, i)}>{t.text}</span
                 >{/each}{:else}{nodeText(node)}{/if}</span
-          >{/each}{/key}
-      </div>
+          >{/each}</div
+      >{/key}
     {/if}
   </div>
 
   {#if editBusy}
-    <div class="editing-bar">editing… {applying ? 'syncing' : ''}</div>
+    <div class="editing-bar">
+      {applying || awaitingBaseline !== null
+        ? 'syncing edits…'
+        : 'local edits — sync on generate / nav / blur'}
+    </div>
   {/if}
 
   {#if caret && caretNode && !dirty && !applying}
@@ -692,6 +752,23 @@
   }
   .token.inexact.tok-hover {
     text-decoration: underline dotted;
+  }
+  .token.ws-nl::before {
+    /* newline-only tokens render zero width AND their box sits at the start
+       of the NEXT line (under the next token), so they had no hover target
+       for the logprob tooltip. A small literal "\n" marker (pseudo-element:
+       never part of textContent, so the edit diff is untouched) gives them a
+       real inline box at the end of the broken line. Always in layout —
+       toggling it on hover would reflow the paragraph. */
+    content: '\\n';
+    font-size: 0.72em;
+    color: var(--text-dim);
+    opacity: 0.45;
+    padding: 0 1px;
+  }
+  .token.ws-nl.tok-hover::before {
+    opacity: 1;
+    text-decoration: underline;
   }
   .empty {
     font-style: italic;

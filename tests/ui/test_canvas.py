@@ -646,3 +646,78 @@ def test_remote_node_add_never_moves_view_under_my_pointer(weave, page_as, api):
         "focus-follow to center the new node once the pointer is outside",
         timeout_s=4.0,
     )
+
+
+# ================================================================ center-on-demand (task #23)
+
+
+def test_cursor_move_to_visible_node_does_not_pan(weave, page_as, api):
+    """Selecting/navigating to a node already inside the viewport must NOT move
+    the canvas; once the target is offscreen, the same action pans to it."""
+    page = page_as("uitest-clement", weave)
+    data = weave_json(api, weave)
+    root1 = next(r for r in data["roots"] if "loom hummed" in node_text(data["nodes"][r]))
+    kids = data["nodes"][root1]["children"]
+    fit_weave(page)  # every card visible
+
+    # pointer OUT of the canvas (else pointer-suppression masks the behavior):
+    # move the cursor from the TREE list
+    page.mouse.move(30, 30)
+    page.wait_for_timeout(100)
+    t0 = raw_transform(page)
+    page.locator(f'.sidebar [data-node-id="{kids[1]}"]').click()
+    poll_until(
+        page,
+        lambda: cursor_node(api, weave, "uitest-clement") == kids[1],
+        "cursor onto a visible sibling",
+    )
+    page.wait_for_timeout(400)  # focus-follow would fire within this
+    assert raw_transform(page) == t0, (
+        "canvas panned to a node that was already fully visible"
+    )
+
+    # pan far away so EVERYTHING is offscreen -> the same tree-click must pan
+    cb = canvas_box(page)
+    page.mouse.move(cb["x"] + cb["width"] / 2, cb["y"] + cb["height"] / 2)
+    page.mouse.wheel(2500, 2000)
+    page.wait_for_timeout(100)
+    page.mouse.move(30, 30)  # leave the canvas again
+    page.wait_for_timeout(100)
+    t1 = raw_transform(page)
+    assert t1 != t0, "wheel pan did not move the view (test setup)"
+    page.locator(f'.sidebar [data-node-id="{kids[0]}"]').click()
+    poll_until(
+        page,
+        lambda: cursor_node(api, weave, "uitest-clement") == kids[0],
+        "cursor onto the offscreen node",
+    )
+    poll_until(
+        page,
+        lambda: raw_transform(page) != t1,
+        "canvas pans to an offscreen selection",
+        timeout_s=4.0,
+    )
+
+
+# ================================================================ shift+scroll (task #25)
+
+
+def test_shift_wheel_pans_horizontally(weave, page_as, api):
+    """Shift+scroll pans the canvas on the X axis only (a vertical wheel maps
+    onto horizontal movement); zoom and Y stay untouched."""
+    page = page_as("uitest-clement", weave)
+    cb = canvas_box(page)
+    page.mouse.move(cb["x"] + cb["width"] / 2, cb["y"] + cb["height"] / 2)
+    tx0, ty0, s0 = transform_of(page)
+
+    page.keyboard.down("Shift")
+    page.mouse.wheel(0, 80)  # vertical wheel while shift is held
+    page.keyboard.up("Shift")
+    page.wait_for_timeout(100)
+
+    tx1, ty1, s1 = transform_of(page)
+    assert s1 == s0, "shift+wheel must not zoom"
+    assert abs(ty1 - ty0) < 1, f"shift+wheel must not pan vertically (dy={ty1 - ty0})"
+    assert abs((tx0 - tx1) - 80) < 1, (
+        f"shift+wheel should pan x by -80, got {tx1 - tx0}"
+    )

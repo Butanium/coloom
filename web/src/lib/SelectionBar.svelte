@@ -5,25 +5,11 @@
      cascade removes them). -->
 <script lang="ts">
   import { api } from './api'
-  import { clearSelection, validSelection } from './selection.svelte'
-  import { collapsed, deleteNodes, session, withToast } from './state.svelte'
-  import type { Weave } from './types'
+  import { clearSelection, deleteSelection, validSelection } from './selection.svelte'
+  import { collapsed, session, withToast } from './state.svelte'
 
   const ids = $derived(validSelection())
   let busy = $state(false)
-
-  // ids whose selected ancestors won't already delete them via the cascade
-  function topmostOnly(weave: Weave, sel: string[]): string[] {
-    const set = new Set(sel)
-    return sel.filter((id) => {
-      let cur = weave.nodes[id]?.parents[0]
-      while (cur !== undefined) {
-        if (set.has(cur)) return false
-        cur = weave.nodes[cur]?.parents[0]
-      }
-      return true
-    })
-  }
 
   async function bookmarkAll() {
     const weave = session.weave
@@ -45,13 +31,10 @@
   }
 
   async function deleteAll() {
-    const weave = session.weave
-    if (!weave || busy) return
-    const doomed = topmostOnly(weave, ids)
+    if (busy) return
     busy = true
     try {
-      await deleteNodes(doomed) // one undo entry + "undo" toast for the batch
-      clearSelection()
+      await deleteSelection() // one undo entry + "undo" toast for the batch
     } finally {
       busy = false
     }

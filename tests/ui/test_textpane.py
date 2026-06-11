@@ -88,25 +88,43 @@ def hover_token(page, index):
 
 
 def type_at_end(page, text):
-    """Place the caret at the very end of the doc and type `text`."""
+    """Place the caret at the very end of the doc (VERIFIED — a range set while
+    a late re-render still appends spans lands mid-document) and type `text`."""
     # park the pointer off the doc first: a token tooltip opened by hover dwell
     # (pointer resting on the doc between actions) would intercept the click
     page.mouse.move(2, 2)
     page.wait_for_timeout(350)
     page.locator(".doc").click()
-    page.evaluate(
-        """() => {
-            const doc = document.querySelector('.doc');
-            const range = document.createRange();
-            range.selectNodeContents(doc);
-            range.collapse(false);
-            const sel = document.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-            doc.focus();
-        }"""
-    )
+    for _ in range(20):
+        at_end = page.evaluate(
+            """() => {
+                const doc = document.querySelector('.doc');
+                const range = document.createRange();
+                range.selectNodeContents(doc);
+                range.collapse(false);
+                const sel = document.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                doc.focus();
+                const r = document.createRange();
+                r.selectNodeContents(doc);
+                const s = sel.getRangeAt(0);
+                r.setEnd(s.startContainer, s.startOffset);
+                return r.toString().length === (doc.textContent || '').length;
+            }"""
+        )
+        if at_end:
+            break
+        page.wait_for_timeout(100)
+    else:
+        raise AssertionError("caret never settled at the doc end")
     page.keyboard.type(text)
+
+
+def flush_edit(page):
+    """Boundary-flush the locally-held edit (edits are local-until-boundary;
+    blurring the doc is the cheapest boundary — no auto-apply timer exists)."""
+    page.locator(".doc").evaluate("el => el.blur()")
 
 
 @pytest.fixture()
@@ -380,14 +398,35 @@ def test_generate_at_caret_splits_and_generates(weave, page_as, api):
 
 def test_typing_at_doc_end_appends_and_follows_cursor(weave, page_as, api):
     """The legacy composer is GONE: typing at the end of the doc IS the append
-    path. A new human node lands at my cursor and my cursor follows it."""
+    path. A new human node lands at my cursor and my cursor follows it.
+
+    The thread leaf must NOT end in a newline for this to be a deterministic
+    append: a contenteditable caret cannot sit after a trailing '\\n', so
+    Chromium inserts BEFORE it and the diff (correctly) produces a hybrid
+    mid-edit instead. The seeded fake tokens sometimes end with '\\n' — append
+    a clean-ending anchor node over REST first."""
     page = page_as("uitest-clement", weave)
     assert page.locator(".composer").count() == 0, "legacy append composer still rendered"
+    r = api.post(
+        f"/weaves/{weave}/nodes",
+        json={
+            "text": " A clean anchor line.",
+            "parent_id": get_cursor(api, weave)["node_id"],
+            "creator": {"type": "human", "label": "uitest-anchor"},
+            "move_cursor": "uitest-clement",
+        },
+    )
+    r.raise_for_status()
+    assert wait_until(
+        page,
+        lambda: "A clean anchor line." in (page.locator(".doc").text_content() or ""),
+    ), "anchor node never rendered"
     cur_before = get_cursor(api, weave)
     before = get_weave(api, weave)
     marker = " HELLO-FROM-TYPING"
 
     type_at_end(page, marker)
+    flush_edit(page)
 
     def appended():
         now = get_weave(api, weave)
@@ -510,3 +549,53 @@ def test_autoscroll_suppressed_while_pointer_inside(weave, page_as, api):
     assert sc.evaluate("el => el.scrollTop") == 80, (
         "pane auto-scrolled while the pointer was inside it"
     )
+
+
+# ----------------------------------------- whitespace-token hover (item 8)
+
+
+def add_node(api, weave_id, *, content, parent, creator_label="uitest-clement"):
+    r = api.post(
+        f"/weaves/{weave_id}/nodes",
+        json={
+            "text": "",
+            "content": content,
+            "parent_id": parent,
+            "creator": {"type": "model", "label": "gpt-fake"},
+            "move_cursor": creator_label,
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def test_whitespace_only_token_is_hoverable(weave, page_as, api):
+    """A whitespace-only token (e.g. '\\n') renders ~zero width; the hover halo
+    must still give it a real hover target so its logprob tooltip opens."""
+    page = page_as("uitest-clement", weave)
+    cur = get_cursor(api, weave)["node_id"]
+    content = {
+        "type": "tokens",
+        "tokens": [
+            {"text": "alpha", "logprob": -0.5, "top_logprobs": []},
+            {"text": "\n", "logprob": -1.25, "top_logprobs": []},
+            {"text": "beta", "logprob": -0.8, "top_logprobs": []},
+        ],
+    }
+    node = add_node(api, weave, content=content, parent=cur)
+    assert wait_until(
+        page,
+        lambda: page.locator(f'.doc [data-node-id="{node["id"]}"] .token').count() == 3,
+    ), "tokens node did not render in the doc"
+
+    ws = page.locator(f'.doc [data-node-id="{node["id"]}"] .token').nth(1)
+    # the \n marker (::before) gives the span a real inline box at the end of
+    # the broken line — a plain hover must land on it and open ITS tooltip
+    page.mouse.move(2, 2)
+    page.wait_for_timeout(300)
+    ws.hover()
+    page.wait_for_timeout(TIP_HOVER_MS)
+    tip = page.locator("[role=tooltip]")
+    assert tip.count() == 1, "whitespace token tooltip did not appear on hover"
+    text = tip.inner_text()
+    assert "-1.25" in text, f"tooltip is not the newline token's (logprob -1.25): {text!r}"

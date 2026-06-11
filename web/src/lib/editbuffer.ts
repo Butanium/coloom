@@ -25,6 +25,7 @@ export interface BufNode {
   start: number // buffer char (UTF-16) offset of this node's first char
   end: number // exclusive
   bookmarked: boolean
+  childCount: number // branches hanging off this node (coalesce guard)
   // for tokens nodes: buffer offset of each token start, plus a final sentinel
   // == end (so tokenStarts[i]..tokenStarts[i+1] is token i's range)
   tokenStarts: number[]
@@ -63,6 +64,7 @@ export function buildBuffer(threadNodes: WeaveNode[]): EditBuffer {
       start,
       end: offset,
       bookmarked: n.bookmarked,
+      childCount: n.children.length,
       tokenStarts,
       tokens,
     })
@@ -255,13 +257,18 @@ export function planEdit(buf: EditBuffer, newText: string, identity: string): Ed
 
 function planAppend(buf: EditBuffer, added: string, identity: string): EditOp[] {
   const leaf = buf.nodes[buf.nodes.length - 1]
-  // coalesce only into MY own snippet leaf that isn't bookmarked
+  // coalesce only into MY own snippet leaf that isn't bookmarked AND has no
+  // children: rewriting the text of a node with branches under it would
+  // silently change every child's context (nothing-destroyed violation) —
+  // with children present, the typed text becomes a NEW node under the leaf,
+  // sibling to the existing branches
   const mine =
     leaf &&
     leaf.kind === 'snippet' &&
     leaf.creator.type === 'human' &&
     leaf.creator.label === identity &&
-    !leaf.bookmarked
+    !leaf.bookmarked &&
+    leaf.childCount === 0
   if (mine) {
     return [{ op: 'updateText', nodeId: leaf.id, text: leaf.text + added }]
   }

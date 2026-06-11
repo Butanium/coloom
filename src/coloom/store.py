@@ -704,6 +704,92 @@ class WeaveStore:
             )
         return Snippet(text=content.text[:at]), Snippet(text=content.text[at:])
 
+    @staticmethod
+    def _concat_content(a: NodeContent, b: NodeContent) -> NodeContent:
+        """Tokens+Tokens keeps every token (logprobs intact — both halves were
+        produced against this exact prefix); any Snippet involved degrades the
+        pair to a Snippet of the concatenated text."""
+        if isinstance(a, Tokens) and isinstance(b, Tokens):
+            return Tokens(tokens=[*a.tokens, *b.tokens])
+        return Snippet(text=a.text + b.text)
+
+    def merge_with_parent(
+        self, weave_id: str, node_id: str
+    ) -> tuple[Node, list[str], list[dict[str, Any]]]:
+        """Merge node N into its (first) parent P, non-destructively: a NEW
+        node M takes content concat(P, N) and N's children (edges re-pointed,
+        the split_node mechanic); N is soft-deleted (absorbed). When N was P's
+        only live child, P is absorbed too (deletion-op root P, so one
+        `restore_node(P)` undoes the whole pair) and M reads as an in-place
+        merge under P's parent; otherwise M is a new sibling of P and P + the
+        other children stay untouched. Cursors (and bookmark flags) on absorbed
+        nodes migrate to M — their thread content is unchanged.
+
+        Undo semantics (documented in docs/events-api.md): restoring the
+        deletion root brings the absorbed nodes back, but child migration is an
+        edge edit (like split) and is NOT reversed — N's old children stay
+        under M, and M coexists with the restored originals.
+
+        Returns (merged node, deleted node ids [root first], moved cursors as
+        {name, from, to} — the DELETE response vocabulary)."""
+        with self._tx() as c:
+            node = self.get_node(weave_id, node_id)
+            if not node.parents:
+                raise Conflict(
+                    f"node {node_id!r} is a root — there is no parent to merge with"
+                )
+            parent = self.get_node(weave_id, node.parents[0])
+            in_place = parent.children == [node_id]
+            merged = Node(
+                content=self._concat_content(parent.content, node.content),
+                creator=parent.creator,
+                bookmarked=(parent.bookmarked if in_place else False)
+                or node.bookmarked,
+                metadata={"merged_from": [parent.id, node.id]},
+            )
+            self._insert_node(c, weave_id, merged)
+            grandparent = parent.parents[0] if parent.parents else None
+            if grandparent is not None:
+                self._insert_edge(c, weave_id, grandparent, merged.id)
+            # migrate N's children to M (same edge re-point as split_node)
+            c.execute(
+                "UPDATE edges SET parent_id = ? WHERE parent_id = ?",
+                (merged.id, node_id),
+            )
+            # absorb: soft-delete N (and P when merging in place); the live
+            # subtree under the doom root is exactly the absorbed pair/single
+            # now that N's children hang off M
+            doom_root = parent.id if in_place else node_id
+            doomed = self._collect_subtree(weave_id, doom_root)
+            assert set(doomed) == (
+                {parent.id, node_id} if in_place else {node_id}
+            ), f"unexpected merge subtree {doomed!r}"
+            qmarks = ",".join("?" * len(doomed))
+            c.execute(
+                f"UPDATE nodes SET deleted = ? WHERE id IN ({qmarks})",
+                (doom_root, *doomed),
+            )
+            moved: list[dict[str, Any]] = []
+            for cur in self.list_cursors(weave_id).values():
+                if cur.node_id in set(doomed):
+                    self._upsert_cursor(c, weave_id, cur.name, merged.id, None)
+                    moved.append(
+                        {"name": cur.name, "from": cur.node_id, "to": merged.id}
+                    )
+            self._log_event(
+                c,
+                weave_id,
+                "node_merged",
+                {
+                    "node_id": node_id,
+                    "parent_id": parent.id,
+                    "merged_node_id": merged.id,
+                    "deleted_node_ids": doomed,
+                    "in_place": in_place,
+                },
+            )
+            return self.get_node(weave_id, merged.id), doomed, moved
+
     # ------------------------------------------------------------ cursors
 
     def _path_to_root(self, weave_id: str, node_id: str) -> list[str]:

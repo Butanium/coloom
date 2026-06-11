@@ -641,6 +641,30 @@ def create_app(
         await hub.push_new()
         return {"head": head, "tail": tail}
 
+    @app.post("/weaves/{weave_id}/nodes/{node_id}/merge-with-parent")
+    async def merge_with_parent(weave_id: str, node_id: str) -> dict[str, Any]:
+        """Merge the node into its parent: a NEW node M = concat(parent, node)
+        under the grandparent; the node's children migrate to M; the node (and,
+        when it was the parent's only child, the parent too) is soft-deleted.
+        Restorable via .../restore on deleted_node_ids[0] — see
+        docs/events-api.md for the undo semantics. 409 on a root node."""
+        try:
+            merged, deleted, moved_cursors = store.merge_with_parent(
+                weave_id, node_id
+            )
+        except NotFound as e:
+            raise _404(e)
+        except Conflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        await hub.push_new()
+        return {
+            "merged_node_id": merged.id,
+            "merged_node": merged,
+            # DELETE-shaped tail so undo machinery can be reused as-is
+            "deleted_node_ids": deleted,
+            "moved_cursors": moved_cursors,
+        }
+
     @app.patch("/weaves/{weave_id}/nodes/{node_id}")
     async def update_node(
         weave_id: str, node_id: str, req: UpdateNodeRequest
@@ -750,18 +774,30 @@ def create_app(
             **resolved.params,
             **req.params,
         }
-        # presence events: who is generating where (live indicator + activity feed)
+        # presence events: who is generating where (live indicator + activity
+        # feed + client-side placeholder nodes, one per expected completion)
         gen_info: dict[str, Any] = {
             "gen_id": uuid.uuid4().hex,
             "requester": req.cursor,
             "node_id": parent_id,
             "generator": generator.name,
             "generator_id": generator.id,
+            "n": int(params.get("n") or 1),
         }
         store.log_activity(weave_id, "gen_started", gen_info)
         await hub.push_new()
+
+        async def on_retry(attempt: int, max_retries: int, error: str) -> None:
+            # one event per retry attempt: live "retrying k/max" indicators
+            store.log_activity(
+                weave_id,
+                "gen_retrying",
+                {**gen_info, "attempt": attempt, "max": max_retries, "error": error},
+            )
+            await hub.push_new()
+
         try:
-            generated = await generate(endpoint, prompt, params)
+            generated = await generate(endpoint, prompt, params, on_retry=on_retry)
         except (InferenceError, ConfigError) as e:
             store.log_activity(weave_id, "gen_finished", {**gen_info, "error": str(e)})
             await hub.push_new()

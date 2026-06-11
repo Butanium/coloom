@@ -251,6 +251,15 @@ def cmd_split(client: Client, args: argparse.Namespace) -> None:
     )
 
 
+def cmd_merge(client: Client, args: argparse.Namespace) -> None:
+    wid = require_weave(args)
+    out(
+        client.request(
+            "POST", f"/weaves/{wid}/nodes/{args.node_id}/merge-with-parent"
+        )
+    )
+
+
 def _parse_params(pairs: list[str]) -> dict[str, Any]:
     params: dict[str, Any] = {}
     for kv in pairs:
@@ -464,6 +473,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("node_id")
     p.add_argument("--at", type=int, required=True)
     p.set_defaults(func=cmd_split)
+
+    p = sub.add_parser(
+        "merge",
+        help="merge a node into its parent (new merged node; absorbed nodes"
+        " soft-deleted, restorable)",
+    )
+    p.add_argument("node_id")
+    p.set_defaults(func=cmd_merge)
 
     p = sub.add_parser("templates", help="manage templates (server-global shelf)")
     templates_sub = p.add_subparsers(dest="templates_command", required=True)

@@ -41,6 +41,9 @@
     suppressClick: () => boolean
   } = $props()
 
+  // in-flight generation placeholder (task #24): skeleton look, no interactions
+  const pending = $derived(node.metadata.gen_pending === true)
+
   // TEXT fill: creator hue mixed into the light theme text → readable at any
   // tokenOpacity over the dark bg (creatorColor stays for the border stroke).
   const color = $derived(creatorTextColor(node.creator))
@@ -78,6 +81,10 @@
     typeof node.metadata.edited_by === 'string' ? node.metadata.edited_by : null,
   )
   const tooltip = $derived.by(() => {
+    if (pending) {
+      const who = typeof node.metadata.requester === 'string' ? node.metadata.requester : null
+      return `generating — ${creatorLabel(node.creator)}${who ? ` for ${who}` : ''}…`
+    }
     const label = creatorLabel(node.creator) + (editedBy ? ' (edited)' : '')
     const lines = [`${label} · ${new Date(node.created).toLocaleString()}`]
     if (gp) {
@@ -118,7 +125,7 @@
   }
 
   function onCardClick(e: MouseEvent) {
-    if (suppressClick()) return
+    if (suppressClick() || pending) return // placeholders are not targets
     // shift+click = toggle multi-select; it must NOT move the cursor
     if (e.shiftKey) {
       toggleSelected(node.id)
@@ -129,6 +136,7 @@
 
   function onContextMenu(e: MouseEvent) {
     e.preventDefault()
+    if (pending) return
     openContextMenu(node.id, e.clientX, e.clientY)
   }
 
@@ -259,6 +267,7 @@
       rx="7"
       class="bg"
       class:hovered
+      class:pending
       style:stroke
       style:stroke-width={strokeWidth}
     />
@@ -284,7 +293,12 @@
       />
     {/if}
     <foreignObject x={box.x} y={box.y} width={box.w} height={box.h}>
-      <div class="text" style:color style:-webkit-line-clamp={Math.floor((box.h - 16) / 18)}>
+      <div
+        class="text"
+        class:pending
+        style:color
+        style:-webkit-line-clamp={Math.floor((box.h - 16) / 18)}
+      >
         {#if text === ''}
           <span class="empty">(no text)</span>
         {:else if node.content.type === 'tokens'}
@@ -314,7 +328,7 @@
   {/each}
 
   <!-- strip contents: connector line + (`+` on hover | always-visible `…` stub) -->
-  {#if showStub || hovered}
+  {#if (showStub || hovered) && !pending}
     <line
       class="connector"
       class:on-thread={showStub ? childOnThread : onMyThread}
@@ -324,7 +338,9 @@
       y2={cy}
     />
   {/if}
-  {#if showStub}
+  {#if pending}
+    <!-- placeholders have no strip/toolbar: nothing to do on them yet -->
+  {:else if showStub}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <g
       class="stub clickable"
@@ -357,7 +373,7 @@
     </g>
   {/if}
 
-  {#if hovered}
+  {#if hovered && !pending}
     <!-- hover toolbar below the card: generate / add child / bookmark / delete / collapse -->
     {#each toolbar as btn, i (btn.key)}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -394,6 +410,24 @@
   }
   .bg.hovered {
     fill: #2c2c3c;
+  }
+  .bg.pending {
+    /* in-flight generation placeholder: dashed outline, slightly sunken */
+    stroke-dasharray: 6 4;
+    fill: var(--bg-raised);
+  }
+  .text.pending {
+    font-style: italic;
+    animation: gen-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes gen-pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 0.85;
+    }
   }
   .cursor-ring {
     fill: none;

@@ -138,6 +138,27 @@ def test_cli_bookmark_split_rm(capsys, live_server):
     assert split["tail"]["id"] in tree["nodes"]
 
 
+def test_cli_merge(capsys, live_server):
+    created = run(capsys, live_server, "new", "--text", "hello")
+    wid = created["weave"]["id"]
+    root_id = created["root"]["id"]
+    child = run(
+        capsys, live_server, "--weave", wid,
+        "add", "--parent", root_id, "--text", " world",
+    )
+
+    merged = run(capsys, live_server, "--weave", wid, "merge", child["id"])
+    assert merged["merged_node"]["content"]["text"] == "hello world"
+    assert merged["deleted_node_ids"] == [root_id, child["id"]]
+    tree = run(capsys, live_server, "--weave", wid, "read", "--tree")
+    assert set(tree["nodes"]) == {merged["merged_node_id"]}
+    assert tree["roots"] == [merged["merged_node_id"]]
+
+    # undoable through the existing restore path
+    restored = run(capsys, live_server, "--weave", wid, "restore", root_id)
+    assert set(restored["restored_node_ids"]) == {root_id, child["id"]}
+
+
 def test_cli_stdin_add(capsys, live_server, monkeypatch):
     import io
 

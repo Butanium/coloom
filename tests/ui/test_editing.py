@@ -3,6 +3,10 @@ diffed (web/src/lib/editbuffer.ts) into split/append/hybrid-edit/copy ops applie
 over REST. Nothing is ever destroyed — mid-document edits strand the original as
 a sibling branch. A blank weave is the same surface: typing creates the root.
 
+Edits are LOCAL-UNTIL-BOUNDARY (no auto-apply timer): they land when a boundary
+action fires — doc blur, generate, cursor move, node ops, weave switch. Tests
+trigger the boundary explicitly via flush_edit() (blur) after typing.
+
 Every assertion goes through the REST API (the `api` fixture), polling for the
 WS round trip. Edits are driven by selecting a character range in the doc and
 inserting text via execCommand('insertText') — fires a real `input` event, the
@@ -131,6 +135,50 @@ def edit_replace(page, start, end, text):
     )
 
 
+def flush_edit(page):
+    """Boundary-flush the locally-held edit: blurring the doc is the cheapest
+    boundary (edits are local-until-boundary; there is no auto-apply timer)."""
+    page.locator(".doc").evaluate("el => el.blur()")
+
+
+PLACE_CARET_END_JS = """() => {
+    const doc = document.querySelector('.doc');
+    const range = document.createRange();
+    range.selectNodeContents(doc);
+    range.collapse(false);
+    const sel = document.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    doc.focus();
+}"""
+
+CARET_AT_END_JS = """() => {
+    const doc = document.querySelector('.doc');
+    const sel = document.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const s = sel.getRangeAt(0);
+    if (!doc.contains(s.startContainer)) return false;
+    const r = document.createRange();
+    r.selectNodeContents(doc);
+    r.setEnd(s.startContainer, s.startOffset);
+    return r.toString().length === (doc.textContent || '').length;
+}"""
+
+
+def place_caret_at_end(page):
+    """Caret to the very end of the doc, VERIFIED on the NEXT tick: the click
+    that focused the doc can asynchronously re-assert its own (mid-text) caret
+    after our range is set, and a late re-render can append spans past a
+    (docEl, offset) range — both turned an end-append into a hybrid mid-edit
+    (the flake). Set, let a tick pass, check-only; repeat until it sticks."""
+    for _ in range(20):
+        page.evaluate(PLACE_CARET_END_JS)
+        page.wait_for_timeout(60)
+        if page.evaluate(CARET_AT_END_JS):
+            return
+    raise AssertionError("caret never settled at the doc end (doc still re-rendering?)")
+
+
 def type_at_end(page, text):
     """Place the caret at the very end of the doc and type `text`."""
     # park the pointer off the doc first: a token tooltip opened by hover dwell
@@ -138,18 +186,7 @@ def type_at_end(page, text):
     page.mouse.move(2, 2)
     page.wait_for_timeout(350)
     page.locator(".doc").click()
-    page.evaluate(
-        """() => {
-            const doc = document.querySelector('.doc');
-            const range = document.createRange();
-            range.selectNodeContents(doc);
-            range.collapse(false);
-            const sel = document.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-            doc.focus();
-        }"""
-    )
+    place_caret_at_end(page)
     page.keyboard.type(text)
 
 
@@ -176,6 +213,7 @@ def test_blank_weave_typing_creates_root_then_coalesces(blank_weave, page_as, ap
 
     page.locator(".doc").click()
     page.keyboard.type("Once upon")
+    flush_edit(page)
 
     def root_made():
         w = get_weave(api, blank_weave)
@@ -200,6 +238,7 @@ def test_blank_weave_typing_creates_root_then_coalesces(blank_weave, page_as, ap
     # continue typing -> coalesces into the SAME node
     page.wait_for_timeout(WS_SETTLE_MS)
     type_at_end(page, " a time")
+    flush_edit(page)
 
     def grew():
         w = get_weave(api, blank_weave)
@@ -225,6 +264,7 @@ def test_append_typing_coalesces_into_one_growing_human_node(weave, page_as, api
     n_before = len(before["nodes"])
 
     type_at_end(page, " FIRST")
+    flush_edit(page)
     # one new human node appended under the model leaf
     new_node = wait_until(
         page,
@@ -242,6 +282,7 @@ def test_append_typing_coalesces_into_one_growing_human_node(weave, page_as, api
 
     # keep typing into the SAME growing node -> coalesce (no extra node)
     type_at_end(page, " SECOND")
+    flush_edit(page)
     grew = wait_until(
         page,
         lambda: "SECOND" in node_text(get_weave(api, weave)["nodes"].get(new_node["id"], new_node)),
@@ -280,6 +321,7 @@ def test_mid_node_edit_of_model_tokens_makes_hybrid_sibling(weave, page_as, api)
     start = base + sum(len(t) for t in orig_tokens[:3])
     end = base + sum(len(t) for t in orig_tokens[:5])
     edit_replace(page, start, end, "XMID")
+    flush_edit(page)
 
     def settled():
         now = get_weave(api, weave)
@@ -375,6 +417,7 @@ def test_mid_thread_edit_copies_downstream_node_with_provenance(weave, page_as, 
     root_text = node_text(root)
     # edit a range inside the root snippet (offsets 4..8 -> mid 'loom hummed')
     edit_replace(page, 4, 8, "WOVE")
+    flush_edit(page)
 
     def settled():
         now = get_weave(api, weave)
@@ -432,6 +475,7 @@ def test_tail_deletion_moves_cursor_without_deleting(weave, page_as, api):
     # delete the last ~4 tokens' worth of text (a prefix of the buffer remains)
     keep = len(full) - sum(len(t) for t in orig_tokens[-4:])
     edit_replace(page, keep, len(full), "")
+    flush_edit(page)
 
     def settled():
         now = get_weave(api, weave)
@@ -467,13 +511,22 @@ def test_tail_deletion_moves_cursor_without_deleting(weave, page_as, api):
 
 def test_caret_survives_a_rerender_after_edit(weave, page_as, api):
     """After an edit applies and the WS refetch rebuilds spans, the caret is
-    restored to its character offset (not lost / not jumped to the end)."""
+    restored to its character offset (not lost / not jumped to the end).
+    Caret restoration only applies while the doc keeps focus, so the boundary
+    here is the FOCUS-PRESERVING one: the generate shortcut (Ctrl+Enter), which
+    flushes the held edit before generating."""
     page = page_as("uitest-clement", weave)
     errors = collect_pageerrors(page)
-    before = get_weave(api, weave)
 
     type_at_end(page, " CARETMARK")
-    assert wait_for_doc(page, lambda t: "CARETMARK" in t), "edit never applied"
+    page.keyboard.press("Control+Enter")  # boundary: flush + generate, focus stays
+    assert wait_until(
+        page,
+        lambda: any(
+            "CARETMARK" in node_text(n)
+            for n in get_weave(api, weave)["nodes"].values()
+        ),
+    ), "edit never applied"
     # let the WS refetch rebuild the doc
     page.wait_for_timeout(WS_SETTLE_MS)
 
@@ -535,6 +588,7 @@ def test_emoji_snippet_edit_is_codepoint_correct(weave, page_as, api):
     )
     assert base >= 0
     edit_replace(page, base + 1, base + 5, "Z")
+    flush_edit(page)
 
     def settled():
         now = get_weave(api, weave)
@@ -594,6 +648,7 @@ def test_multiline_insert_preserves_newlines(weave, page_as, api):
         }""",
         [12, multiline],
     )
+    flush_edit(page)
 
     # the newlines must survive verbatim into some node's stored text
     def newlines_kept():
@@ -612,10 +667,11 @@ def test_multiline_insert_preserves_newlines(weave, page_as, api):
 
 
 def test_rapid_typing_across_sync_window_no_duplication(weave, page_as, api):
-    """Type batch1; type batch2 inside batch1's apply/refetch window (the weave
-    refetch is route-DELAYED to hold the window open deterministically). The
-    serialized-edit design must NOT re-plan batch1 against a stale baseline:
-    exactly one node carries batch1, the doc equals the thread, nothing doubles.
+    """Flush batch1; type + flush batch2 inside batch1's apply/refetch window
+    (the weave refetch is route-DELAYED to hold the window open
+    deterministically). The serialized-edit design must NOT re-plan batch1
+    against a stale baseline: exactly one node carries batch1, the doc equals
+    the thread, nothing doubles.
 
     Regression for the double-append bug (a second " BATCH-ONE BATCH-TWO" node
     duplicating batch1 as a junk sibling branch)."""
@@ -628,8 +684,10 @@ def test_rapid_typing_across_sync_window_no_duplication(weave, page_as, api):
     ))
 
     type_at_end(page, " BATCH-ONE")
-    page.wait_for_timeout(800)  # past the 600ms debounce: plan 1 executed, refetch held
-    page.keyboard.type(" BATCH-TWO")
+    flush_edit(page)
+    page.wait_for_timeout(400)  # plan 1 executed, refetch held by the route
+    type_at_end(page, " BATCH-TWO")  # refocus + type inside the sync window
+    flush_edit(page)
 
     # settle: route delay + refetch + serialized second apply + reconcile
     def settled():
@@ -658,3 +716,128 @@ def test_rapid_typing_across_sync_window_no_duplication(weave, page_as, api):
     assert doc_text == th["content"], "doc diverged from the canonical thread"
     assert doc_text.count("BATCH-ONE") == 1 and doc_text.count("BATCH-TWO") == 1
     assert errors == [], f"page errors during rapid typing: {errors}"
+
+
+# ------------------------------------------- boundary-flush (local-until-boundary)
+
+
+def test_edits_stay_local_until_boundary(weave, page_as, api):
+    """Typed text does NOT auto-apply (there is no timer anymore): the server
+    stays unchanged across a long typing pause; a boundary action (clicking a
+    tree row = blur + cursor move) lands the edit, THEN runs the action."""
+    page = page_as("uitest-clement", weave)
+    errors = collect_pageerrors(page)
+    before = get_weave(api, weave)
+    root_id = get_thread(api, weave)["nodes"][0]["id"]
+
+    type_at_end(page, " LOCALONLY")
+    page.wait_for_timeout(1500)  # far past the old 600ms debounce
+    assert len(get_weave(api, weave)["nodes"]) == len(before["nodes"]), (
+        "edit reached the server without any boundary action"
+    )
+    # the pane reports the held state
+    assert "local edits" in (page.locator(".editing-bar").text_content() or "")
+
+    # boundary: click a tree row -> flush lands the edit, then the cursor moves
+    page.locator(f'.sidebar [data-node-id="{root_id}"]').click()
+
+    def landed():
+        w = get_weave(api, weave)
+        return any("LOCALONLY" in node_text(n) for n in w["nodes"].values())
+
+    assert wait_until(page, landed), f"boundary did not flush the edit; errors={errors}"
+    assert wait_until(
+        page, lambda: get_cursor(api, weave)["node_id"] == root_id
+    ), "the boundary action (cursor move) did not run after the flush"
+    assert errors == [], f"page errors during boundary flush: {errors}"
+
+
+# --------------------------------------- end truncation + post-edit navigation
+
+
+def test_end_truncation_cursor_lands_on_head_and_nav_keeps_pane_live(
+    blank_weave, page_as, api
+):
+    """Delete a big chunk at the END of the doc (tail of one node + everything
+    after): the cursor must land on the kept head and the pane must re-render
+    the truncated thread; SUBSEQUENT navigation must keep cursor + pane in
+    sync. Regression for optimistic-state incident 5: a weave snapshot fetched
+    before the edit plan's cursor POST but assigned after it clawed the LOCAL
+    cursor back to the pre-edit leaf (own-origin echo absorbed -> patch replay
+    can't restore it), leaving the pane stuck on the old thread and navigation
+    computing targets from the stale node."""
+    page = page_as("uitest-clement", blank_weave)
+    errors = collect_pageerrors(page)
+    a_text, b_text, c_text = "Alpha alpha alpha. ", "Bravo bravo bravo. ", "Charlie charlie."
+    a = add_node(api, blank_weave, a_text, parent=None)["id"]
+    b = add_node(api, blank_weave, b_text, parent=a)["id"]
+    add_node(api, blank_weave, c_text, parent=b)
+    assert wait_for_doc(page, lambda t: t == a_text + b_text + c_text), "thread not rendered"
+
+    # select mid-B .. end and Delete (keep "Bravo "), then boundary-flush
+    keep = len(a_text) + 6
+    edit_replace(page, keep, len(a_text + b_text + c_text), "")
+    flush_edit(page)
+
+    # cursor on the kept head (B keeps its id), pane shows the truncated thread
+    assert wait_until(
+        page, lambda: get_cursor(api, blank_weave)["node_id"] == b, deadline_s=10
+    ), f"cursor did not land on the kept head; errors={errors}"
+    assert wait_for_doc(page, lambda t: t == a_text + "Bravo "), (
+        f"pane did not re-render the truncated thread: {page.locator('.doc').text_content()!r}"
+    )
+
+    # post-edit navigation: parent — cursor AND pane must follow
+    page.keyboard.press("Alt+ArrowLeft")
+    assert wait_until(
+        page, lambda: get_cursor(api, blank_weave)["node_id"] == a, deadline_s=8
+    ), "nav-to-parent went to the wrong node (stale local cursor — incident 5)"
+    assert wait_for_doc(page, lambda t: t == a_text), (
+        f"pane stuck after post-edit navigation: {page.locator('.doc').text_content()!r}"
+    )
+    # nothing destroyed: 4 nodes (A, B-head, split tail, C)
+    assert len(get_weave(api, blank_weave)["nodes"]) == 4
+    assert errors == [], f"page errors: {errors}"
+
+
+# ------------------------------- append onto a leaf that already has children
+
+
+def test_append_on_leaf_with_children_branches_instead_of_rewriting(
+    blank_weave, page_as, api
+):
+    """Typing at the end of MY OWN snippet leaf normally coalesces in place —
+    but NOT when the leaf has children: rewriting it would silently change
+    every branch's context. The typed text must become a NEW node under the
+    leaf (sibling to the existing branches), original text untouched."""
+    page = page_as("uitest-clement", blank_weave)
+    errors = collect_pageerrors(page)
+    a = add_node(api, blank_weave, "Stem text", parent=None)["id"]
+    b = add_node(api, blank_weave, "branch one", parent=a, move_cursor=False)["id"]
+    set_cursor(api, blank_weave, a)
+    assert wait_for_doc(page, lambda t: t == "Stem text"), "thread not rendered"
+
+    type_at_end(page, " MORE")
+    flush_edit(page)
+
+    def branched():
+        w = get_weave(api, blank_weave)
+        fresh = [
+            n for nid, n in w["nodes"].items() if nid not in (a, b)
+        ]
+        return (w, fresh[0]) if len(fresh) == 1 else None
+
+    result = wait_until(page, branched)
+    assert result, f"append created nothing; errors={errors}"
+    w, new = result
+    # the stem is UNTOUCHED — its existing branch's context is preserved
+    assert w["nodes"][a]["content"]["text"] == "Stem text", (
+        "appending onto a leaf with children rewrote it in place"
+    )
+    assert new["content"] == {"type": "snippet", "text": " MORE"}
+    assert new["parents"] == [a], "typed text did not land as a child of the leaf"
+    assert set(w["nodes"][a]["children"]) == {b, new["id"]}, (
+        "new node is not a sibling of the existing branch"
+    )
+    assert get_cursor(api, blank_weave)["node_id"] == new["id"], "cursor did not follow"
+    assert errors == [], f"page errors: {errors}"

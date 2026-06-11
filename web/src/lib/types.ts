@@ -164,6 +164,7 @@ export interface WeaveEvent {
     | 'cursor_moved'
     | 'cursor_removed'
     | 'gen_started'
+    | 'gen_retrying'
     | 'gen_finished'
     // global (not weave-scoped) — payload {id, name, profile?, by, origin}
     | 'template_created'
@@ -182,7 +183,10 @@ export interface ActiveGen {
   requester: string | null
   node_id: string
   generator: string | null // generator name
+  n: number // expected completions (placeholder skeletons, one each)
   started: string
+  // set by gen_retrying events (transient failure, server is retrying)
+  retry: { attempt: number; max: number; error: string } | null
 }
 
 export function nodeText(node: WeaveNode): string {

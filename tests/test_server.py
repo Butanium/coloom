@@ -272,13 +272,14 @@ def test_gen_emits_presence_events(client):
     assert started["payload"]["node_id"] == root["id"]
     assert started["payload"]["generator"] == "default"
     assert len(finished["payload"]["node_ids"]) == 2
-    # failure path also closes the indicator
+    # failure path also closes the indicator (retries: 0 — transport errors
+    # are transient and would otherwise back off ~15s before surfacing)
     client.post(
         f"/weaves/{wid}/gen",
         json={
             "node_id": root["id"],
             "generator_id": dead["id"],
-            "params": {"timeout": 2},
+            "params": {"timeout": 2, "retries": 0},
         },
     )
     events = client.get(f"/events?weave_id={wid}").json()["events"]
@@ -296,7 +297,7 @@ def test_gen_unreachable_endpoint_is_502(client):
         json={
             "node_id": root["id"],
             "generator_id": dead["id"],
-            "params": {"timeout": 2},
+            "params": {"timeout": 2, "retries": 0},
         },
     )
     assert resp.status_code == 502

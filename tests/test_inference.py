@@ -92,7 +92,7 @@ async def test_unreachable_endpoint_is_inference_error():
 
     endpoint = EndpointConfig(base_url="http://127.0.0.1:1", model="m")
     with pytest.raises(InferenceError, match="failed"):
-        await generate(endpoint, "p", timeout=2.0)
+        await generate(endpoint, "p", {"retries": 0}, timeout=2.0)
 
 
 def test_no_logprobs_degrades_to_snippet():

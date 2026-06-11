@@ -11,8 +11,10 @@ Parsing edge cases follow Tapestry-Loom's polyparser (see docs/PLAN.md):
 
 from __future__ import annotations
 
+import asyncio
 import math
-from typing import Any
+import random
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -30,6 +32,26 @@ from coloom.models import (
 
 class InferenceError(Exception):
     pass
+
+
+# --------------------------------------------------------------------- retry
+
+# Coloom-internal params: consumed by coloom itself in the merged params chain
+# (server defaults <- template/generator <- per-request) and STRIPPED from the
+# request body before it goes upstream — backends must never see them.
+INTERNAL_PARAM_KEYS = frozenset({"retries"})
+
+MAX_RETRIES_DEFAULT = 5  # server-wide default; override via the `retries` param
+BACKOFF_BASE = 0.5  # seconds; doubles per attempt (tests monkeypatch this)
+BACKOFF_CAP = 8.0  # seconds
+
+# Called as (attempt, max_retries, reason) right before each backoff sleep.
+RetryCallback = Callable[[int, int, str], Awaitable[None]]
+
+
+def is_transient_status(status: int) -> bool:
+    """Retryable HTTP statuses: timeout, rate limit, server-side errors."""
+    return status in (408, 429) or 500 <= status <= 599
 
 
 def truncated_entropy(top_logprobs: list[TopLogprob]) -> float:
@@ -142,13 +164,27 @@ def parse_completion_response(
     return nodes
 
 
+def _parse_retries(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InferenceError(f"retries must be a non-negative integer, got {value!r}")
+    return value
+
+
 async def generate(
     endpoint: EndpointConfig,
     prompt: str,
     params: dict[str, Any] | None = None,
     timeout: float = 120.0,
+    on_retry: RetryCallback | None = None,
 ) -> list[Node]:
-    """POST /completions and parse into Nodes. `params` overlays endpoint params."""
+    """POST /completions and parse into Nodes. `params` overlays endpoint params.
+
+    Transient upstream failures (httpx transport errors, HTTP 408/429/5xx) are
+    retried with exponential backoff + jitter (BACKOFF_BASE · 2^attempt, capped
+    at BACKOFF_CAP), up to `retries` times (coloom-internal param, default
+    MAX_RETRIES_DEFAULT, stripped before the body goes upstream). `on_retry`
+    is awaited before each backoff sleep — the server uses it to emit
+    `gen_retrying` events. Non-transient failures raise immediately."""
     if endpoint.kind != "completions":
         raise InferenceError(f"endpoint kind {endpoint.kind!r} not supported yet")
     body: dict[str, Any] = {
@@ -158,21 +194,49 @@ async def generate(
         "prompt": prompt,
         "stream": False,
     }
+    max_retries = MAX_RETRIES_DEFAULT
+    if "retries" in body:
+        max_retries = _parse_retries(body["retries"])
+    for key in INTERNAL_PARAM_KEYS:
+        body.pop(key, None)
     if body.get("echo"):
         raise InferenceError(
             "echo is not supported: an echoed node would duplicate the prompt"
             " (= the parent thread) into the weave"
         )
     url = endpoint.base_url.rstrip("/") + "/completions"
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=body, headers=endpoint.resolve_headers())
-    except httpx.HTTPError as e:
-        raise InferenceError(f"request to {url} failed: {e!r}") from e
-    if resp.status_code != 200:
-        raise InferenceError(f"HTTP {resp.status_code} from {url}: {resp.text[:2000]}")
-    try:
-        payload = resp.json()
-    except ValueError as e:
-        raise InferenceError(f"non-JSON response from {url}: {resp.text[:500]}") from e
-    return parse_completion_response(payload, body)
+    attempt = 0
+    while True:
+        last_exc: Exception | None = None
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    url, json=body, headers=endpoint.resolve_headers()
+                )
+        except httpx.TransportError as e:
+            # connect/read timeouts, refused connections, broken pipes — transient
+            last_exc = e
+            error = f"request to {url} failed: {e!r}"
+        except httpx.HTTPError as e:
+            # non-transport client errors (bad URL, redirect loop) — not transient
+            raise InferenceError(f"request to {url} failed: {e!r}") from e
+        else:
+            if resp.status_code == 200:
+                try:
+                    payload = resp.json()
+                except ValueError as e:
+                    raise InferenceError(
+                        f"non-JSON response from {url}: {resp.text[:500]}"
+                    ) from e
+                return parse_completion_response(payload, body)
+            error = f"HTTP {resp.status_code} from {url}: {resp.text[:2000]}"
+            if not is_transient_status(resp.status_code):
+                raise InferenceError(error)
+        if attempt >= max_retries:
+            raise InferenceError(error) from last_exc
+        attempt += 1
+        if on_retry is not None:
+            await on_retry(attempt, max_retries, error[:300])
+        delay = min(BACKOFF_BASE * 2 ** (attempt - 1), BACKOFF_CAP)
+        # full-ish jitter: 50–100% of the exponential step
+        await asyncio.sleep(delay * (0.5 + random.random() * 0.5))

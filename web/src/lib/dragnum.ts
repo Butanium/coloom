@@ -15,9 +15,15 @@ export interface DragnumParams {
   decimals: number
   /** current value; null = no override yet (drag seeds from `seed()`) */
   get: () => number | null
+  /** called every frame during the drag — LOCAL visual update only; persist
+   * in `dragEnd` (commit-on-release, docs/optimistic-state.md leg-3 corollary) */
   set: (v: number) => void
   /** starting value when get() is null (e.g. the generator's own param) */
   seed: () => number
+  /** the 4px threshold was crossed: a real drag began (gesture start) */
+  dragStart?: () => void
+  /** a real drag ended (pointer released after dragging): commit here */
+  dragEnd?: () => void
 }
 
 const THRESHOLD_PX = 4
@@ -58,6 +64,9 @@ export function dragnum(node: HTMLElement, params: DragnumParams) {
       if (Math.hypot(dx, dy) < THRESHOLD_PX) return
       dragging = true
       node.classList.add('dragnum-dragging')
+      // dragStart BEFORE blur: the blur ends a focus gesture, and overlapping
+      // gesture depths must never hit zero mid-drag (authority would lapse)
+      p.dragStart?.()
       if (node instanceof HTMLInputElement) node.blur()
     }
     e.preventDefault()
@@ -69,6 +78,7 @@ export function dragnum(node: HTMLElement, params: DragnumParams) {
     if (dragging) {
       node.releasePointerCapture(pointerId)
       node.classList.remove('dragnum-dragging')
+      p.dragEnd?.() // commit-on-release
     }
     pointerId = null
     dragging = false

@@ -11,13 +11,15 @@ import {
   matchesBinding,
   type ActionId,
 } from './keybindings.svelte'
-import { clearSelection } from './selection.svelte'
+import { clearSelection, deleteSelection, validSelection } from './selection.svelte'
 import {
   closeContextMenu,
   collapsed,
   contextMenu,
   deleteNode,
+  flushPendingEdits,
   generateAt,
+  hasPendingEdits,
   moveMyCursor,
   myCursorNodeId,
   sendViewCommand,
@@ -88,19 +90,32 @@ async function deleteCursorNode() {
   await deleteNode(cur)
 }
 
-/** Move my cursor along the tree; false = clamped (let the browser have the key). */
+/** Move my cursor along the tree; false = clamped (let the browser have the key).
+ * Boundary-flush: a held doc edit lands first, and since its plan can MOVE my
+ * cursor (mid-thread edit → new branch), the target is recomputed after the
+ * flush. The pre-flush answer only decides preventDefault (sync constraint). */
 function navigate(dir: 'parent' | 'child' | 'prev' | 'next'): boolean {
-  const target = navigationTarget(dir)
-  if (target === null) return false
-  void moveMyCursor(target)
-  sendViewCommand('center-node', target)
+  const provisional = navigationTarget(dir)
+  if (provisional === null && !hasPendingEdits()) return false
+  void (async () => {
+    await flushPendingEdits()
+    const target = navigationTarget(dir) // recompute: the flush may have moved me
+    if (target === null) return
+    void moveMyCursor(target) // its own flush is a no-op now
+    sendViewCommand('center-node', target)
+  })()
   return true
 }
 
 function generate(opts: { moveCursor?: boolean } = {}): boolean {
-  const cur = myCursorNodeId()
-  if (cur === null) return false
-  void generateAt(cur, opts)
+  if (myCursorNodeId() === null && !hasPendingEdits()) return false
+  void (async () => {
+    // flush FIRST, then read the cursor: the flush may move it (mid-thread
+    // edit → new branch) or even create it (first typing in a blank weave)
+    await flushPendingEdits()
+    const cur = myCursorNodeId()
+    if (cur !== null) await generateAt(cur, opts)
+  })()
   return true
 }
 
@@ -134,6 +149,14 @@ const handlers: Record<ActionId, () => boolean> = {
     return true
   },
   delete_current: () => {
+    // a live multi-selection takes precedence (item 7): Delete removes ALL
+    // selected nodes via the SelectionBar path — one undo batch + toast, no
+    // confirmation, selection cleared. (Never fires from editable targets:
+    // bare keys don't dispatch there, so Delete-while-typing stays text.)
+    if (validSelection().length > 0) {
+      void deleteSelection()
+      return true
+    }
     void deleteCursorNode()
     return true
   },

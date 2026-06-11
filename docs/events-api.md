@@ -52,6 +52,32 @@ To render "in weave X" labels, resolve `weave_id` against `GET /weaves`
 (title lookup); the server deliberately doesn't denormalize titles into
 event rows.
 
+## Generation retries (`gen_retrying`)
+
+Upstream `/v1/completions` calls retry on **transient** failures only — httpx
+transport errors (connect/read timeouts, refused connections) and HTTP
+408/429/5xx — with exponential backoff + jitter (0.5s · 2^attempt, capped at
+8s). Non-transient statuses (400/401/403/404/422, …) fail immediately, zero
+retries. Default budget: **5 retries** (6 upstream attempts), server-wide;
+override with a `retries` key anywhere in the params merge chain
+(template/generator/request params, later wins; `retries: 0` disables). It is
+a **coloom-internal param**: stripped from the body before it goes upstream
+(and from the node's `creator.raw_request`).
+
+Each retry attempt emits a weave-scoped event *before* the backoff sleep:
+
+```
+gen_retrying {gen_id, requester, node_id, generator, generator_id, n,
+              attempt: 1-based, max: <retry budget>, error: <short reason>}
+```
+
+Same `gen_id` (and the rest of the `gen_started` payload) as the generation
+it belongs to, so clients can label in-flight placeholders "retrying k/max".
+Feed ordering is always `gen_started` < `gen_retrying`* < `gen_finished`. The
+terminal outcome is unchanged: success or exhaustion/non-transient failure
+ends in the usual `gen_finished` (`node_ids` vs `error`), and the HTTP
+response stays 201/502.
+
 ## Node soft-delete & restore (frontend undo)
 
 Nothing is ever destroyed: `DELETE` on a node marks its subtree with a
@@ -116,3 +142,50 @@ delete B (inside A) → delete A → restore B   ⇒ both ops undone (B must be 
 `nodes.deleted TEXT` (additive migration): `NULL` = live, else the id of the
 node whose DELETE removed this row (the deletion-op root). CLI:
 `coloom rm <node_id>` / `coloom restore <node_id>`.
+
+## Merge with parent
+
+```
+POST /weaves/{wid}/nodes/{N}/merge-with-parent  →  200
+{
+  merged_node_id:   string,
+  merged_node:      Node,          // convenience: M without a refetch
+  deleted_node_ids: string[],      // deletion-op root first (DELETE shape)
+  moved_cursors:    [{name, from, to}, ...]
+}
+```
+
+Non-destructive: a **new** node M is created with content concat(P, N) —
+Tokens+Tokens keeps every token (logprobs intact, both halves were sampled
+against this exact prefix); any Snippet involved degrades to a Snippet of the
+concatenated text. M carries `metadata.merged_from: [P_id, N_id]` and P's
+creator. N's children migrate to M (edge re-point, the same mechanic as
+split). Then:
+
+- **N was P's only live child** ("in place"): M hangs under P's parent (a new
+  root if P was one); P **and** N are soft-deleted in one deletion op rooted
+  at P → `deleted_node_ids: [P, N]`. Cursors sitting on P or N move to M
+  (their thread content is unchanged); M inherits a bookmark from either.
+- **P has other live children** ("sibling"): M becomes a new sibling of P
+  under P's parent; only N is absorbed → `deleted_node_ids: [N]`. P, its
+  other children, and their cursors/bookmarks are untouched; cursors on N
+  move to M; M inherits N's bookmark only. (An already-soft-deleted sibling
+  doesn't count as a live child — it keeps its own earlier deletion op.)
+
+Errors: merging a root → **409** (no parent); unknown/deleted node → **404**.
+Event: `node_merged {node_id: N, parent_id: P, merged_node_id, deleted_node_ids,
+in_place: bool}`, origin-stamped as usual. CLI: `coloom merge <node_id>`.
+
+### Undo semantics (binding, mind the asymmetry)
+
+`POST .../nodes/{deleted_node_ids[0]}/restore` brings the absorbed node(s)
+back via the normal restore path. But **child migration is an edge edit (like
+split) and is NOT reversed**: N's former children stay under M, and M
+coexists with the restored originals. Consequences for undo UIs:
+
+- N was a leaf → restore yields the exact original shape, plus M lingering as
+  a sibling (or extra root). Deleting M then is safe and completes the undo.
+- N had children → after restore, N is back but childless; the children live
+  under M. Do **not** delete M here — that would cascade-soft-delete the
+  migrated children. Leave M in place.
+

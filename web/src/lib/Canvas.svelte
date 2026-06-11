@@ -11,6 +11,7 @@
     session,
     threadPath,
     viewCommand,
+    weaveWithPlaceholders,
   } from './state.svelte'
 
   let container: HTMLDivElement
@@ -27,9 +28,10 @@
   const MIN_SCALE = 0.05
   const MAX_SCALE = 1
 
-  const layout = $derived(
-    session.weave ? layoutWeave(session.weave, collapsed) : null,
-  )
+  // weave + phantom placeholder children for in-flight generations (task #24):
+  // ALL layout-related reads below go through weaveAug so phantom ids resolve
+  const weaveAug = $derived(weaveWithPlaceholders())
+  const layout = $derived(weaveAug ? layoutWeave(weaveAug, collapsed) : null)
 
   const myThread = $derived.by(() => {
     const weave = session.weave
@@ -71,7 +73,7 @@
   })
 
   const edges = $derived.by(() => {
-    const weave = session.weave
+    const weave = weaveAug
     if (!weave || !layout) return []
     const v = viewBounds
     const out: { key: string; d: string; onThread: boolean }[] = []
@@ -217,6 +219,10 @@
       tx = px - ((px - tx) / scale) * next
       ty = py - ((py - ty) / scale) * next
       scale = next
+    } else if (e.shiftKey) {
+      // shift+scroll: horizontal pan — a vertical wheel maps onto X (some
+      // browsers/trackpads already deliver shifted scrolls as deltaX; keep it)
+      tx -= e.deltaX !== 0 ? e.deltaX : e.deltaY
     } else {
       // plain scroll: two-axis pan (spec §2 — wheel pans, it does not zoom)
       tx -= e.deltaX
@@ -240,6 +246,26 @@
     if (!w || !h) return
     tx = w / 2 - (box.x + box.w / 2) * scale
     ty = h / 2 - (box.y + box.h / 2) * scale
+  }
+
+  /** Is the node's card fully inside the viewport (with a margin, so "nearly
+   * outside" counts as outside)? Selection/navigation only pans when this is
+   * false — a visible node must not yank the view (task #23). A card larger
+   * than the viewport on an axis counts as visible on that axis when it spans
+   * past both margins (it fills the screen; recentering would just jitter). */
+  function nodeVisible(nodeId: string): boolean {
+    const box = layout?.boxes.get(nodeId)
+    if (!box) return false
+    const [w, h] = viewportSize()
+    if (!w || !h) return false
+    const m = 40
+    const x0 = box.x * scale + tx
+    const y0 = box.y * scale + ty
+    const x1 = (box.x + box.w) * scale + tx
+    const y1 = (box.y + box.h) * scale + ty
+    const visX = x1 - x0 <= w - 2 * m ? x0 >= m && x1 <= w - m : x0 <= m && x1 >= w - m
+    const visY = y1 - y0 <= h - 2 * m ? y0 >= m && y1 <= h - m : y0 <= m && y1 >= h - m
+    return visX && visY
   }
 
   // spec §5: zoom so the node renders at 90% of native scale (or exact-fit if
@@ -288,7 +314,10 @@
     // pointer suppression (sacred): never auto-move the view under the pointer
     if (!pf.bypass && pointerInside) return
     if (pf.mode === 'zoom') focusZoom(pf.id)
-    else centerOn(pf.id)
+    // center-on-demand (task #23): pan only when the node is (nearly) outside
+    // the viewport — selecting/navigating to a visible node must not move the
+    // view. fit/zoom commands above always act (they're explicit view asks).
+    else if (!nodeVisible(pf.id)) centerOn(pf.id)
   })
 
   // initial view: center on my cursor (or the first root)
@@ -373,10 +402,10 @@
       {#each edges as edge (edge.key)}
         <path class="edge" class:on-thread={edge.onThread} d={edge.d} />
       {/each}
-      {#if session.weave && layout}
+      {#if weaveAug && layout}
         {#each visibleCards as [id, box] (id)}
           <NodeCard
-            node={session.weave.nodes[id]}
+            node={weaveAug.nodes[id]}
             {box}
             onMyThread={myThread.has(id)}
             cursorsHere={cursorsByNode.get(id) ?? []}

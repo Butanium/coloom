@@ -23,6 +23,7 @@
     toggleBookmark,
     toggleCollapsed,
     ui,
+    weaveWithPlaceholders,
   } from './state.svelte'
   import type { Cursor, WeaveNode } from './types'
   import { genParams, nodeText } from './types'
@@ -35,6 +36,11 @@
   // plain (non-reactive) on purpose: read only inside callbacks/effects, and
   // pointer enter/leave must never retrigger renders or autoscroll effects
   let pointerInside = false
+
+  // weave + phantom placeholder children for in-flight generations (task #24);
+  // the subtree renderer reads THIS so skeleton rows appear under the target.
+  // Search / window-roots stay on the real weave (placeholders aren't targets).
+  const weaveAug = $derived(weaveWithPlaceholders())
 
   const myCursorId = $derived(session.weave?.cursors[identity.name]?.node_id ?? null)
   const myThread = $derived.by(() => {
@@ -195,11 +201,13 @@
   {@const hovered = session.hoveredNodeId === node.id}
   {@const cursorsHere = cursorsByNode.get(node.id) ?? []}
   {@const prob = singleTokenProb(node)}
+  {@const pending = node.metadata.gen_pending === true}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="row"
     class:hovered
+    class:pending
     class:on-thread={myThread.has(node.id)}
     class:is-cursor={myCursorId === node.id}
     data-node-id={node.id}
@@ -209,10 +217,12 @@
     onpointerleave={() => {
       if (session.hoveredNodeId === node.id) session.hoveredNodeId = null
     }}
-    onclick={() => onRowClick(node, fromSearch)}
+    onclick={() => {
+      if (!pending) onRowClick(node, fromSearch) // placeholders are not targets
+    }}
     oncontextmenu={(e) => {
       e.preventDefault()
-      openContextMenu(node.id, e.clientX, e.clientY)
+      if (!pending) openContextMenu(node.id, e.clientX, e.clientY)
     }}
   >
     {#if !fromSearch && node.children.length > 0}
@@ -232,7 +242,7 @@
     {/each}
     {@render rowLabel(node)}
     <span class="right">
-      {#if hovered}
+      {#if hovered && !pending}
         <span class="strip">
           <button
             title="generate completions (middle/mod-click: also move my cursor)"
@@ -291,7 +301,7 @@
 {/snippet}
 
 {#snippet subtree(id: string, depth: number)}
-  {@const node = session.weave?.nodes[id]}
+  {@const node = weaveAug?.nodes[id]}
   {#if node}
     {@render row(node, depth, false)}
     {#if node.children.length > 0 && !collapsed.has(id)}
@@ -431,6 +441,23 @@
   }
   .row.is-cursor {
     box-shadow: inset 0 0 0 1px var(--my-cursor-color);
+  }
+  .row.pending {
+    /* in-flight generation placeholder: dimmed pulse, not a click target */
+    cursor: default;
+  }
+  .row.pending .label {
+    font-style: italic;
+    animation: gen-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes gen-pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 0.85;
+    }
   }
 
   .tri {
